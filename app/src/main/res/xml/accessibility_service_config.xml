@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  다른 앱 화면을 읽고(노드 트리) 조작하기(클릭·스크롤·제스처) 위한 설정.
+
+  canRetrieveWindowContent : 화면 텍스트 읽기
+  canPerformGestures       : 탭 / 스와이프 / 당겨서 새로고침 제스처
+  canTakeScreenshot        : 발견 시점 화면 캡처 (API 30+)
+  flagRetrieveInteractiveWindows : 여러 창을 순회해 대상 앱 창을 고르기 위함
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_desc"
+    android:notificationTimeout="100"
+    android:summary="@string/accessibility_summary" />

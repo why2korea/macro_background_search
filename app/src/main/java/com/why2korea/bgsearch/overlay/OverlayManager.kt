@@ -8,14 +8,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.ContextThemeWrapper
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
-import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
@@ -26,19 +24,22 @@ import kotlin.math.abs
 private const val TAG = "BgSearchOverlay"
 
 /**
- * 오버레이 윈도우 전체를 관리한다.
+ * 오버레이 윈도우 관리.
  *
- * 윈도우 구성 (모두 TYPE_APPLICATION_OVERLAY)
- *  1. webWindow    : WebView 전용. 확장/축소와 무관하게 항상 붙어 있고 크기도 바뀌지 않는다(기본값).
- *                    축소 시 alpha 를 거의 0 으로 낮추고 NOT_TOUCHABLE + NOT_FOCUSABLE 을 건다.
- *  2. controlWindow: 확장 상태의 하단 컨트롤 바.
- *  3. bubbleWindow : 축소 상태의 원형 버블. 드래그 이동 + 가장자리 스냅.
- *  4. bannerWindow : 발견 시 상단 배너.
- *  5. closeWindow  : 버블 드래그/롱프레스 시 하단 종료 영역.
+ * WebView 가 사라졌으므로 윈도우 구성이 단순해졌다.
+ *  1. panelWindow  : 확장 상태의 컴팩트 패널 (상태 · 로그 · 버튼)
+ *  2. bubbleWindow : 축소 상태의 원형 버블 (약 1cm)
+ *  3. bannerWindow : 발견 시 상단 배너
+ *  4. closeWindow  : 버블 드래그/롱프레스 시 하단 종료 영역
  *
- * 컨트롤 바를 WebView 와 같은 윈도우에 넣지 않은 이유:
- * 같은 윈도우면 컨트롤 바를 숨길 때 WebView 높이가 바뀌어 페이지가 리플로우되고
- * 스크롤 위치가 흐트러진다. 윈도우를 분리하면 WebView 뷰포트가 절대 바뀌지 않는다.
+ * 모든 창은 FLAG_NOT_FOCUSABLE 이다. 포커스를 뺏지 않아야
+ * 접근성 서비스가 읽는 "활성 창"이 대상 앱으로 유지된다.
+ *
+ * 버블 조작
+ *  - 탭      : 시작/정지 토글 (설정에서 끄면 패널 확장)
+ *  - 더블탭  : 패널 확장
+ *  - 드래그  : 이동 + 가장자리 스냅, 하단 종료 영역에 놓으면 종료
+ *  - 롱프레스: 종료 영역 표시
  */
 class OverlayManager(
     private val service: Context,
@@ -46,7 +47,17 @@ class OverlayManager(
     private val onBubbleMoved: (Int, Int) -> Unit
 ) {
 
-    private val themed: Context = android.view.ContextThemeWrapper(service, R.style.Theme_BgSearch)
+    companion object {
+        private const val DOUBLE_TAP_MS = 280L
+        private const val TAP_MAX_MS = 400L
+
+        /** 모든 오버레이 윈도우 공통 플래그. */
+        private const val FLAGS_BASE =
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+    }
+
+    private val themed: Context = ContextThemeWrapper(service, R.style.Theme_BgSearch)
     private val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val owner = OverlayLifecycleOwner()
     private val main = Handler(Looper.getMainLooper())
@@ -54,8 +65,8 @@ class OverlayManager(
     /** 물리 1cm (계산 불가 시 60dp 폴백) */
     val bubbleSizePx: Int = Metrics.oneCmPx(service)
 
-    /** 축소 시 WebView 윈도우 크기를 유지할지 여부. 서비스가 설정값으로 갱신한다. */
-    var keepFullSizeWhenCollapsed: Boolean = true
+    /** 버블 탭이 시작/정지를 토글할지. 서비스가 설정값으로 갱신한다. */
+    var bubbleTapToggles: Boolean = true
 
     private val overlayType =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -63,22 +74,16 @@ class OverlayManager(
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-    // ------------------------------------------------------------------ 뷰
-
-    private var webRoot: FrameLayout? = null
-    private var controlView: ComposeView? = null
+    private var panelView: ComposeView? = null
     private var bannerView: ComposeView? = null
-    private var bubbleView: BubbleView? = null
     private var closeView: ComposeView? = null
-
-    private var webParams: WindowManager.LayoutParams? = null
+    private var bubbleView: BubbleView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
 
-    private var webAdded = false
-    private var controlAdded = false
+    private var panelAdded = false
     private var bannerAdded = false
-    private var bubbleAdded = false
     private var closeAdded = false
+    private var bubbleAdded = false
 
     private val closeActive = mutableStateOf(false)
 
@@ -95,130 +100,59 @@ class OverlayManager(
         owner.onResume()
     }
 
-    fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(service)
+    fun canDrawOverlays(): Boolean = try {
+        Settings.canDrawOverlays(service)
+    } catch (e: Throwable) {
+        false
+    }
 
-    /**
-     * WebView 를 담을 윈도우를 만들고 즉시 붙인다.
-     * WebView 는 여기 들어간 뒤 서비스가 살아있는 동안 절대 분리되지 않는다.
-     */
-    fun installWebView(webView: View): Boolean {
-        if (webAdded) return true
-        val root = FrameLayout(themed).apply {
-            isFocusableInTouchMode = true
-            setOnKeyListener { _, keyCode, event ->
-                if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-                    actions.onCollapse()
-                    true
-                } else false
-            }
-        }
-        (webView.parent as? ViewGroup)?.removeView(webView)
-        root.addView(
-            webView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-        owner.attachTo(root)
-
-        val p = baseParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-        }
-        webRoot = root
-        webParams = p
-        webAdded = addSafely(root, p)
-        if (webAdded) applyWebWindowMode(expandedNow = false)
-        return webAdded
+    fun destroy() {
+        hideBanner()
+        hideCloseZone()
+        hideBubble()
+        hidePanel()
+        owner.onDestroy()
+        panelView = null
+        bannerView = null
+        closeView = null
+        bubbleView = null
     }
 
     // ------------------------------------------------------------------ 확장 / 축소
 
     fun expand() {
-        if (!webAdded) return
         expanded = true
-        applyWebWindowMode(expandedNow = true)
-        showControlBar()
         hideBubble()
         hideCloseZone()
-        webRoot?.let {
-            it.requestFocus()
-        }
+        showPanel()
     }
 
     fun collapse() {
-        if (!webAdded) return
         expanded = false
-        applyWebWindowMode(expandedNow = false)
-        hideControlBar()
-        showBubble()
+        hidePanel()
         hideCloseZone()
+        showBubble()
     }
 
-    /**
-     * WebView 윈도우의 표시 모드를 적용한다.
-     *
-     * 축소 상태에서도 WebView 를 파괴하지 않는다. 크기를 0 으로 만들면 렌더링과 JS 타이머가
-     * 멈출 수 있으므로 최소한의 크기는 반드시 유지한다.
-     *  - keepFullSizeWhenCollapsed = true  → 화면 전체 크기 유지 + alpha 0.01 (뷰포트 불변, 권장)
-     *  - keepFullSizeWhenCollapsed = false → 버블과 같은 1cm 크기로 줄여 버블 바로 뒤에 배치
-     */
-    private fun applyWebWindowMode(expandedNow: Boolean) {
-        val p = webParams ?: return
-        val root = webRoot ?: return
-        if (expandedNow) {
-            p.width = WindowManager.LayoutParams.MATCH_PARENT
-            p.height = WindowManager.LayoutParams.MATCH_PARENT
-            p.x = 0
-            p.y = 0
-            p.flags = FLAGS_BASE
-            p.alpha = 1f
-        } else {
-            p.flags = FLAGS_BASE or
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            p.alpha = 0.01f
-            if (keepFullSizeWhenCollapsed) {
-                p.width = WindowManager.LayoutParams.MATCH_PARENT
-                p.height = WindowManager.LayoutParams.MATCH_PARENT
-                p.x = 0
-                p.y = 0
-            } else {
-                p.width = bubbleSizePx
-                p.height = bubbleSizePx
-                p.x = bubbleX
-                p.y = bubbleY
-            }
-        }
-        updateSafely(root, p)
-    }
+    // ------------------------------------------------------------------ 패널
 
-    // ------------------------------------------------------------------ 컨트롤 바
-
-    private fun showControlBar() {
-        if (controlAdded) return
-        val v = newComposeView { ControlBar(actions) }
-        controlView = v
+    private fun showPanel() {
+        if (panelAdded) return
+        val v = newComposeView { ControlPanel(actions) }
+        panelView = v
         val p = baseParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.START
-            flags = FLAGS_BASE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        }
-        controlAdded = addSafely(v, p)
+        ).apply { gravity = Gravity.BOTTOM or Gravity.START }
+        panelAdded = addSafely(v, p)
     }
 
-    private fun hideControlBar() {
-        val v = controlView ?: return
-        if (!controlAdded) return
+    private fun hidePanel() {
+        val v = panelView ?: return
+        if (!panelAdded) return
         removeSafely(v)
-        controlAdded = false
-        controlView = null
+        panelAdded = false
+        panelView = null
     }
 
     // ------------------------------------------------------------------ 버블
@@ -244,12 +178,21 @@ class OverlayManager(
             WindowManager.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            flags = FLAGS_BASE or
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            flags = FLAGS_BASE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             x = bubbleX
             y = bubbleY
         }
+
+    private fun createBubble(): BubbleView {
+        val v = BubbleView(themed, bubbleSizePx)
+        attachBubbleTouch(v)
+        bubbleView = v
+        if (bubbleX == 0 && bubbleY == 0) {
+            bubbleX = Metrics.screenWidthPx(service) - (bubbleSizePx * 1.6f).toInt()
+            bubbleY = (Metrics.screenHeightPx(service) * 0.28f).toInt()
+        }
+        return v
+    }
 
     fun setBubblePosition(x: Int, y: Int) {
         bubbleX = x
@@ -262,13 +205,11 @@ class OverlayManager(
         }
     }
 
-    fun setBubbleColor(color: Int) {
-        bubbleView?.setBubbleColor(color)
-    }
+    fun setBubbleColor(color: Int) = bubbleView?.setBubbleColor(color)
 
-    fun setBubbleBadge(count: Int) {
-        bubbleView?.setBadge(count)
-    }
+    fun setBubbleBadge(count: Int) = bubbleView?.setBadge(count)
+
+    fun setBubbleLabel(text: String) = bubbleView?.setLabel(text)
 
     private fun clampBubble(p: WindowManager.LayoutParams) {
         val w = Metrics.screenWidthPx(service)
@@ -280,18 +221,6 @@ class OverlayManager(
         bubbleY = p.y
     }
 
-    private fun createBubble(): BubbleView {
-        val v = BubbleView(themed, bubbleSizePx)
-        attachBubbleTouch(v)
-        bubbleView = v
-        // 최초 위치: 우측 상단에서 약간 아래
-        if (bubbleX == 0 && bubbleY == 0) {
-            bubbleX = Metrics.screenWidthPx(service) - (bubbleSizePx * 1.6f).toInt()
-            bubbleY = (Metrics.screenHeightPx(service) * 0.28f).toInt()
-        }
-        return v
-    }
-
     private fun attachBubbleTouch(v: BubbleView) {
         val slop = ViewConfiguration.get(service).scaledTouchSlop
         val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
@@ -301,9 +230,11 @@ class OverlayManager(
         var downRawY = 0f
         var downAt = 0L
         var dragging = false
+        var lastTapAt = 0L
 
-        val longPress = Runnable {
-            if (!dragging) showCloseZone()
+        val longPress = Runnable { if (!dragging) showCloseZone() }
+        val singleTap = Runnable {
+            if (bubbleTapToggles) actions.onToggleFromBubble() else actions.onExpand()
         }
 
         v.setOnTouchListener { _, e ->
@@ -326,6 +257,7 @@ class OverlayManager(
                     if (!dragging && (abs(dx) > slop || abs(dy) > slop)) {
                         dragging = true
                         main.removeCallbacks(longPress)
+                        main.removeCallbacks(singleTap)
                         showCloseZone()
                     }
                     if (dragging) {
@@ -333,7 +265,6 @@ class OverlayManager(
                         p.y = startY + dy
                         clampBubble(p)
                         updateSafely(v, p)
-                        if (!keepFullSizeWhenCollapsed && !expanded) applyWebWindowMode(false)
                         closeActive.value = isOverCloseZone(e.rawY)
                     }
                     true
@@ -346,6 +277,7 @@ class OverlayManager(
                     dragging = false
                     closeActive.value = false
                     hideCloseZone()
+
                     if (over) {
                         // 터치 디스패치 도중 윈도우를 떼면 불안정하므로 다음 루프로 미룬다.
                         main.post { actions.onExit() }
@@ -353,8 +285,19 @@ class OverlayManager(
                     }
                     if (wasDragging) {
                         snapToEdge(v, p)
-                    } else if (System.currentTimeMillis() - downAt < 400) {
-                        main.post { actions.onExpand() }
+                        return@setOnTouchListener true
+                    }
+                    if (System.currentTimeMillis() - downAt < TAP_MAX_MS) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastTapAt < DOUBLE_TAP_MS) {
+                            // 더블탭 = 패널 확장
+                            main.removeCallbacks(singleTap)
+                            lastTapAt = 0L
+                            main.post { actions.onExpand() }
+                        } else {
+                            lastTapAt = now
+                            main.postDelayed(singleTap, DOUBLE_TAP_MS)
+                        }
                     }
                     true
                 }
@@ -364,7 +307,6 @@ class OverlayManager(
         }
     }
 
-    /** 가장자리 스냅 애니메이션. */
     private fun snapToEdge(v: View, p: WindowManager.LayoutParams) {
         val screenW = Metrics.screenWidthPx(service)
         val size = (bubbleSizePx * 1.44f).toInt()
@@ -376,14 +318,14 @@ class OverlayManager(
             return
         }
         try {
-            val anim = ValueAnimator.ofInt(from, targetX)
-            anim.duration = 180
-            anim.addUpdateListener { a ->
-                p.x = a.animatedValue as Int
-                updateSafely(v, p)
-                if (!keepFullSizeWhenCollapsed && !expanded) applyWebWindowMode(false)
+            ValueAnimator.ofInt(from, targetX).apply {
+                duration = 180
+                addUpdateListener { a ->
+                    p.x = a.animatedValue as Int
+                    updateSafely(v, p)
+                }
+                start()
             }
-            anim.start()
         } catch (e: Throwable) {
             p.x = targetX
             updateSafely(v, p)
@@ -408,9 +350,7 @@ class OverlayManager(
             WindowManager.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.START
-            flags = FLAGS_BASE or
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            flags = FLAGS_BASE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
         closeAdded = addSafely(v, p)
     }
@@ -432,10 +372,7 @@ class OverlayManager(
         val p = baseParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            flags = FLAGS_BASE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        }
+        ).apply { gravity = Gravity.TOP or Gravity.START }
         bannerAdded = addSafely(v, p)
     }
 
@@ -447,25 +384,6 @@ class OverlayManager(
         bannerView = null
     }
 
-    // ------------------------------------------------------------------ ComposeView 생성
-
-    /**
-     * 오버레이 윈도우에 붙일 ComposeView 를 매번 새로 만든다.
-     *
-     * 같은 ComposeView 인스턴스를 removeView 후 다시 addView 하면
-     * 화면에는 그려지지만 포인터 입력이 라우팅되지 않아 버튼이 먹지 않는다.
-     * (실기기 확인: 첫 확장에서는 동작, 축소 후 재확장하면 모든 버튼 무반응)
-     * ComposeView 를 윈도우 사이에서 재사용하지 않는 것이 확실한 해법이라
-     * 표시할 때마다 새로 만들고 숨길 때 참조를 버린다.
-     */
-    private fun newComposeView(content: @Composable () -> Unit): ComposeView {
-        val cv = ComposeView(themed)
-        owner.attachTo(cv)
-        // 기본 전략(detach 시 컴포지션 폐기)을 그대로 쓴다. 뷰를 재사용하지 않으므로 유지할 이유가 없다.
-        cv.setContent(content)
-        return cv
-    }
-
     // ------------------------------------------------------------------ 기타
 
     fun onConfigurationChanged() {
@@ -473,24 +391,20 @@ class OverlayManager(
             clampBubble(p)
             bubbleView?.let { v -> if (bubbleAdded) updateSafely(v, p) }
         }
-        applyWebWindowMode(expanded)
     }
 
-    fun destroy() {
-        hideBanner()
-        hideCloseZone()
-        hideBubble()
-        hideControlBar()
-        webRoot?.let {
-            if (webAdded) removeSafely(it)
-        }
-        webAdded = false
-        owner.onDestroy()
-        webRoot = null
-        controlView = null
-        bannerView = null
-        bubbleView = null
-        closeView = null
+    /**
+     * 오버레이 윈도우에 붙일 ComposeView 를 매번 새로 만든다.
+     *
+     * 같은 ComposeView 인스턴스를 removeView 후 다시 addView 하면
+     * 화면에는 그려지지만 포인터 입력이 라우팅되지 않아 버튼이 먹지 않는다.
+     * (v1.0.0 실기기 확인: 첫 확장에서는 동작, 축소 후 재확장하면 전부 무반응)
+     */
+    private fun newComposeView(content: @Composable () -> Unit): ComposeView {
+        val cv = ComposeView(themed)
+        owner.attachTo(cv)
+        cv.setContent(content)
+        return cv
     }
 
     // ------------------------------------------------------------------ 윈도우 헬퍼
@@ -523,10 +437,5 @@ class OverlayManager(
         } catch (e: Throwable) {
             Log.w(TAG, "removeView failed", e)
         }
-    }
-
-    private companion object {
-        /** 모든 오버레이 윈도우 공통 플래그. */
-        const val FLAGS_BASE = WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
     }
 }

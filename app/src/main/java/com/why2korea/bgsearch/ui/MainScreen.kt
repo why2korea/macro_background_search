@@ -76,6 +76,7 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
+    val hasA11y = remember(permTick) { Permissions.hasAccessibility(context) }
     val canOverlay = remember(permTick) { Permissions.canDrawOverlays(context) }
     val hasNoti = remember(permTick) { Permissions.hasNotification(context) }
     val battOk = remember(permTick) { Permissions.isIgnoringBatteryOptimizations(context) }
@@ -89,6 +90,8 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
             runCatching { notiLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
         }
     }
+
+    val ready = hasA11y && canOverlay
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -104,20 +107,22 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "오버레이 패널에서 탐색이 돌아가고, 축소하면 약 1cm 버블 뒤에서 계속 동작합니다.",
+                "버블로 축소한 뒤, 지금 보고 있는 다른 앱 화면에서 1차 문자열을 찾아 클릭하고 " +
+                    "스크롤하며 2차 문자열을 찾습니다.",
                 fontSize = 12.sp,
                 color = Color(0xFF616161)
             )
 
-            PermissionCard(canOverlay, hasNoti, battOk) { which ->
+            PermissionCard(hasA11y, canOverlay, hasNoti, battOk) { which ->
                 when (which) {
-                    0 -> Permissions.openOverlaySettings(context)
-                    1 -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    0 -> Permissions.openAccessibilitySettings(context)
+                    1 -> Permissions.openOverlaySettings(context)
+                    2 -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         runCatching { notiLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
                             .onFailure { Permissions.openAppNotificationSettings(context) }
                     } else Permissions.openAppNotificationSettings(context)
 
-                    2 -> Permissions.requestIgnoreBatteryOptimizations(context)
+                    3 -> Permissions.requestIgnoreBatteryOptimizations(context)
                 }
             }
 
@@ -126,7 +131,7 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
             NotifyCard(state, vm)
 
             ControlRow(
-                canOverlay = canOverlay,
+                ready = ready,
                 running = engine.running,
                 onStart = { vm.startSearch { activity?.moveTaskToBack(true) } },
                 onOpenOverlay = { vm.openOverlay { activity?.moveTaskToBack(true) } },
@@ -142,6 +147,7 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
                 }
             }
 
+            UsageCard()
             StatusCard(engine.round, engine.step, engine.elapsedText, engine.status, engine.foundCount)
             BubbleInfo()
             LogCard(engine.logs)
@@ -153,6 +159,7 @@ fun MainScreen(vm: SetupViewModel = viewModel()) {
 
 @Composable
 private fun PermissionCard(
+    hasA11y: Boolean,
     canOverlay: Boolean,
     hasNoti: Boolean,
     battOk: Boolean,
@@ -161,12 +168,20 @@ private fun PermissionCard(
     Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("권한", fontWeight = FontWeight.Bold)
-            PermissionRow("다른 앱 위에 표시 (필수)", canOverlay) { onFix(0) }
-            PermissionRow("알림 표시", hasNoti) { onFix(1) }
-            PermissionRow("배터리 최적화 제외", battOk) { onFix(2) }
+            PermissionRow("접근성 서비스 (필수)", hasA11y) { onFix(0) }
+            PermissionRow("다른 앱 위에 표시 (필수)", canOverlay) { onFix(1) }
+            PermissionRow("알림 표시", hasNoti) { onFix(2) }
+            PermissionRow("배터리 최적화 제외", battOk) { onFix(3) }
+            if (!hasA11y) {
+                Text(
+                    "설정 > 접근성 > 설치된 앱 > '백그라운드 문자열 탐색' 을 켜야 다른 앱 화면을 읽을 수 있습니다.",
+                    fontSize = 11.sp,
+                    color = Color(0xFFC62828)
+                )
+            }
             if (!canOverlay) {
                 Text(
-                    "오버레이 권한이 없으면 플로팅 패널과 버블이 뜨지 않습니다. (앱은 크래시하지 않습니다)",
+                    "오버레이 권한이 없으면 버블과 패널이 뜨지 않습니다. (앱은 크래시하지 않습니다)",
                     fontSize = 11.sp,
                     color = Color(0xFFC62828)
                 )
@@ -201,13 +216,6 @@ private fun InputCard(state: SetupUiState, vm: SetupViewModel) {
     Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
-                value = cfg.url,
-                onValueChange = vm::onUrlChange,
-                label = { Text("대상 URL") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
                 value = cfg.primaryText,
                 onValueChange = vm::onPrimaryChange,
                 label = { Text("1차 문자열 (찾아서 클릭)") },
@@ -215,7 +223,11 @@ private fun InputCard(state: SetupUiState, vm: SetupViewModel) {
                 modifier = Modifier.fillMaxWidth()
             )
 
-            Text("2차 문자열 목록 (${cfg.secondaryTexts.size}개)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text(
+                "2차 문자열 목록 (${cfg.secondaryTexts.size}개)",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -288,30 +300,25 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                 Slider(
                     value = cfg.scrollRatio,
                     onValueChange = vm::setRatio,
-                    valueRange = 0.1f..1.5f
+                    valueRange = 0.1f..1.2f
                 )
                 NumberField("스텝 간 대기 (ms)", cfg.stepDelayMs.toString()) {
                     vm.setStepDelay(it.toLongOrNull() ?: cfg.stepDelayMs)
                 }
-                NumberField("새로고침 후 대기 (ms, 최소 5000)", cfg.refreshDelayMs.toString()) {
-                    vm.setRefreshDelay(it.toLongOrNull() ?: cfg.refreshDelayMs)
+                NumberField("시작 카운트다운 (ms)", cfg.startDelayMs.toString()) {
+                    vm.setStartDelay(it.toLongOrNull() ?: cfg.startDelayMs)
+                }
+                NumberField("새로고침 후 대기 (ms, 최소 3000)", cfg.refreshWaitMs.toString()) {
+                    vm.setRefreshWait(it.toLongOrNull() ?: cfg.refreshWaitMs)
                 }
                 NumberField("최대 라운드 (0 = 무제한)", cfg.maxRounds.toString()) {
                     vm.setMaxRounds(it.toIntOrNull() ?: cfg.maxRounds)
                 }
                 Spacer(Modifier.height(6.dp))
                 SwitchRow(
-                    label = "축소 시 WebView 크기 유지 (권장)",
-                    checked = cfg.keepFullSizeWhenCollapsed,
-                    onChange = vm::setKeepFullSize
-                )
-                Text(
-                    if (cfg.keepFullSizeWhenCollapsed)
-                        "화면 크기를 유지한 채 투명도만 거의 0 으로 낮춥니다. 뷰포트가 바뀌지 않아 스크롤 탐색이 안정적입니다."
-                    else
-                        "버블과 같은 1cm 크기로 줄여 버블 뒤에 둡니다. 화면 점유는 최소지만 페이지가 좁은 폭으로 리플로우됩니다.",
-                    fontSize = 11.sp,
-                    color = Color(0xFF757575)
+                    label = "버블 탭으로 시작/정지 (끄면 탭 = 패널 열기)",
+                    checked = cfg.bubbleTapToggles,
+                    onChange = vm::setBubbleTapToggles
                 )
             }
         }
@@ -338,11 +345,29 @@ private fun NotifyCard(state: SetupUiState, vm: SetupViewModel) {
     }
 }
 
+// ---------------------------------------------------------------- 사용법
+
+@Composable
+private fun UsageCard() {
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("사용법", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text("1. 문자열 입력 후 [탐색 시작] → 버블로 축소되고 카운트다운 시작", fontSize = 12.sp)
+            Text("2. 카운트다운 동안 대상 앱/웹사이트 화면으로 이동", fontSize = 12.sp)
+            Text("3. 카운트다운이 끝나면 그 화면에서 탐색 시작", fontSize = 12.sp)
+            Spacer(Modifier.height(4.dp))
+            Text("버블 조작", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("• 탭 = 시작/정지 토글    • 더블탭 = 패널 열기", fontSize = 12.sp)
+            Text("• 드래그 = 이동 (가장자리 스냅)    • 하단으로 끌면 종료", fontSize = 12.sp)
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 컨트롤
 
 @Composable
 private fun ControlRow(
-    canOverlay: Boolean,
+    ready: Boolean,
     running: Boolean,
     onStart: () -> Unit,
     onOpenOverlay: () -> Unit,
@@ -356,9 +381,9 @@ private fun ControlRow(
         ) {
             Button(
                 onClick = onStart,
-                enabled = canOverlay && !running,
+                enabled = ready && !running,
                 modifier = Modifier.weight(1f)
-            ) { Text("오버레이 열고 탐색 시작") }
+            ) { Text("탐색 시작") }
 
             Button(
                 onClick = onStop,
@@ -373,9 +398,9 @@ private fun ControlRow(
         ) {
             OutlinedButton(
                 onClick = onOpenOverlay,
-                enabled = canOverlay,
+                enabled = ready,
                 modifier = Modifier.weight(1f)
-            ) { Text("오버레이만 열기") }
+            ) { Text("버블만 띄우기") }
             OutlinedButton(onClick = onExit, modifier = Modifier.weight(1f)) { Text("서비스 종료") }
         }
     }

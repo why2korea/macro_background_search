@@ -2,10 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- 다른 앱 위에 그리기 (플로팅 오버레이 / 버블) -->
+    <!-- 다른 앱 위에 그리기 (플로팅 버블 / 패널) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -23,7 +20,6 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.BgSearch">
 
         <activity
@@ -39,11 +35,27 @@
             </intent-filter>
         </activity>
 
+        <!-- 오버레이 + 루프 오케스트레이션 -->
         <service
             android:name=".service.OverlayService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 다른 앱 화면을 읽고 조작하는 접근성 서비스 -->
+        <service
+            android:name=".service.ScanService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
 
     </application>
 </manifest>

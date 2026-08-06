@@ -34,3 +34,4 @@ _backup/
 *.log
 .cxx/
 .externalNativeBuild/
+dist/

@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.why2korea.bgsearch.service.ScanService
 
 private const val TAG = "BgSearchPerm"
 
@@ -27,6 +28,8 @@ object Permissions {
         false
     }
 
+    fun hasAccessibility(ctx: Context): Boolean = ScanService.isEnabled(ctx)
+
     fun hasNotification(ctx: Context): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
@@ -39,6 +42,10 @@ object Permissions {
         pm?.isIgnoringBatteryOptimizations(ctx.packageName) ?: false
     } catch (e: Throwable) {
         false
+    }
+
+    fun openAccessibilitySettings(ctx: Context) = safeStart(ctx) {
+        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
     }
 
     fun openOverlaySettings(ctx: Context) = safeStart(ctx) {

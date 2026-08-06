@@ -324,3 +324,48 @@ Galaxy Z Fold (**SM-F966N**, Android 15, 1080x2520, 420dpi) 실기기에 설치�
 - **장시간(수 시간) 백그라운드 지속** 및 화면 꺼짐 상태 동작.
 - 배터리 최적화 제외는 adb 로 설정할 수 없어 미적용 상태다.
 
+
+---
+
+# [v2.0.0 전면 재작성] 요구사항 재정의 반영 — 2026-08-06 오후
+
+요구사항이 재정의되어 앱을 전면 재작성했다.
+
+**변경 요지** — "앱 내장 WebView 안의 웹페이지를 탐색"에서
+"**지금 화면에 떠 있는 다른 앱**을 탐색"으로 바뀌었다. URL 입력이 사라지고,
+문자열 2종만 받아 버블로 축소한 뒤 다른 앱 화면에서 1차 문자열을 찾아 클릭하고
+스크롤하며 2차 문자열을 찾는다.
+
+**핵심 기술 변경** — 다른 앱 화면을 읽고 클릭하려면 `AccessibilityService` 외에 방법이 없다.
+원래 지시서의 "AccessibilityService 사용 금지" / "타 앱 화면 텍스트를 읽지 않음" 두 조항이
+명시적으로 뒤집혔고, 사용자 승인 후 재작성했다.
+
+| | v1.0.x (폐기) | v2.0.0 (현재) |
+|---|---|---|
+| 탐색 대상 | 앱 내장 WebView | 화면에 떠 있는 다른 앱 |
+| 입력값 | URL + 문자열 2종 | 문자열 2종 (URL 없음) |
+| 읽기 | WebView + JS 인젝션 | AccessibilityService 노드 트리 |
+| 클릭 | JS fireClick | ACTION_CLICK → 좌표 탭 제스처 |
+| 스크롤 | JS scrollTop | ACTION_SCROLL_FORWARD → 스와이프 제스처 |
+| 미발견 시 | WebView.reload() | 맨 위로 → 당겨서 새로고침 제스처 → 1차부터 재시작 |
+| 스크린샷 | View.draw(Canvas) | AccessibilityService.takeScreenshot() (API 30+) |
+
+**삭제** — `engine/InjectScripts.kt`, `engine/WebController.kt`, WebView 창, URL 입력, 페이지 로드/새로고침
+**신규** — `service/ScanService.kt`(접근성 서비스), `engine/ScreenScanner.kt`, `util/TextNorm.kt`
+
+**시작 방식 (둘 다 제공)**
+- 패널 [시작] → 버블로 축소 + 카운트다운(기본 5초) → 그 사이 대상 앱으로 이동 → 자동 시작
+- 버블 **탭** → 카운트다운 없이 즉시 시작/정지 토글 (이미 대상 앱을 보고 있을 때)
+- 버블 **더블탭** → 패널 열기
+
+**유지** — 1cm 물리 버블(xdpi/2.54), 드래그·가장자리 스냅·롱프레스 종료, Foreground Service +
+WakeLock, DataStore 설정 저장 및 프로세스 재시작 복원, 알림 6채널 개별 on/off,
+권한 미허용 시 크래시 없이 안내
+
+**한계** — 접근성 노드를 노출하지 않는 화면(일부 게임, Canvas 직접 렌더링)은 못 읽음.
+`FLAG_SECURE` 창(은행앱)은 읽기·캡처 불가. Play 스토어 등록 불가(개인 사이드로드 전용).
+
+**검증 상태** — `assembleDebug` BUILD SUCCESSFUL. **실기기 동작은 미확인**(USB 분리).
+접근성 노드 읽기 / 클릭 / 스크롤 / 당겨서 새로고침 / takeScreenshot 전부 미검증.
+
+자세한 내용은 `README.20260806.md` 참고 (v2.0.0 기준으로 전면 재작성됨).

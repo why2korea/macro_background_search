@@ -20,10 +20,7 @@ import com.why2korea.bgsearch.R
 
 private const val TAG = "BgSearchNotifier"
 
-/**
- * 알림 채널 생성 / 상시 알림 / 발견 알림 / 진동 담당.
- * 참고 프로젝트 WatcherService 의 알림 부분을 분리해 이식했다.
- */
+/** 알림 채널 생성 / 상시 알림 / 발견 알림 / 진동 담당. */
 class Notifier(private val ctx: Context) {
 
     companion object {
@@ -124,8 +121,8 @@ class Notifier(private val ctx: Context) {
         buildOngoing(status, running)
     }
 
-    fun notifyFound(texts: List<String>, url: String, timeText: String, sound: Boolean) {
-        val body = texts.joinToString(", ") + "\n" + timeText + "\n" + url
+    fun notifyFound(texts: List<String>, timeText: String, sound: Boolean) {
+        val body = texts.joinToString(", ") + "\n" + timeText
         val b = NotificationCompat.Builder(ctx, CHANNEL_FOUND)
             .setSmallIcon(R.drawable.ic_stat_search)
             .setContentTitle("문자열 발견!")

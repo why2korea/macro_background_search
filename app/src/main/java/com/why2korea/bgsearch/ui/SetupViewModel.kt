@@ -32,7 +32,7 @@ data class SetupUiState(
 
 /**
  * 설정 화면 전용 ViewModel.
- * 탐색 루프 자체는 OverlayService 가 소유하므로 여기서는 설정 편집과 명령 전송만 한다.
+ * 탐색 루프는 OverlayService 가 소유하므로 여기서는 설정 편집과 명령 전송만 한다.
  */
 class SetupViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -46,8 +46,7 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             try {
-                val cfg = store.configFlow.first()
-                _ui.update { it.copy(config = cfg, loaded = true) }
+                _ui.update { it.copy(config = store.configFlow.first(), loaded = true) }
             } catch (e: Throwable) {
                 Log.w(TAG, "config load failed", e)
                 _ui.update { it.copy(loaded = true) }
@@ -87,7 +86,6 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onUrlChange(v: String) = mutate { it.copy(url = v) }
     fun onPrimaryChange(v: String) = mutate { it.copy(primaryText = v) }
     fun onNewSecondaryChange(v: String) = _ui.update { it.copy(newSecondary = v) }
 
@@ -115,10 +113,12 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setMatchAll(v: Boolean) = mutate { it.copy(matchAll = v) }
-    fun setRatio(v: Float) = mutate { it.copy(scrollRatio = v.coerceIn(0.1f, 1.5f)) }
-    fun setStepDelay(v: Long) = mutate { it.copy(stepDelayMs = v.coerceIn(100L, 30_000L)) }
-    fun setRefreshDelay(v: Long) =
-        mutate { it.copy(refreshDelayMs = v.coerceAtLeast(SearchEngine.MIN_REFRESH_MS)) }
+    fun setRatio(v: Float) = mutate { it.copy(scrollRatio = v.coerceIn(0.1f, 1.2f)) }
+    fun setStepDelay(v: Long) = mutate { it.copy(stepDelayMs = v.coerceIn(200L, 30_000L)) }
+    fun setStartDelay(v: Long) = mutate { it.copy(startDelayMs = v.coerceIn(1_000L, 60_000L)) }
+    fun setBubbleTapToggles(v: Boolean) = mutate { it.copy(bubbleTapToggles = v) }
+    fun setRefreshWait(v: Long) =
+        mutate { it.copy(refreshWaitMs = v.coerceAtLeast(SearchEngine.MIN_REFRESH_MS)) }
 
     fun setMaxRounds(v: Int) = mutate { it.copy(maxRounds = v.coerceAtLeast(0)) }
 
@@ -128,24 +128,22 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     fun setNotifyBanner(v: Boolean) = mutate { it.copy(notifyBanner = v) }
     fun setNotifyBubble(v: Boolean) = mutate { it.copy(notifyBubble = v) }
     fun setNotifyScreenshot(v: Boolean) = mutate { it.copy(notifyScreenshot = v) }
-    fun setKeepFullSize(v: Boolean) = mutate { it.copy(keepFullSizeWhenCollapsed = v) }
 
     fun toggleAdvanced() = _ui.update { it.copy(advancedOpen = !it.advancedOpen) }
     fun toggleNotify() = _ui.update { it.copy(notifyOpen = !it.notifyOpen) }
 
     fun applyHistory(h: HistoryItem) = mutate {
-        it.copy(url = h.url, primaryText = h.primaryText, secondaryTexts = h.secondaryTexts)
+        it.copy(primaryText = h.primaryText, secondaryTexts = h.secondaryTexts)
     }
 
     fun clearMessage() = _ui.update { it.copy(message = "") }
 
     // ------------------------------------------------------------------ 명령
 
-    /** 설정을 저장한 뒤 서비스에 탐색 시작을 요청한다. */
     fun startSearch(onStarted: () -> Unit) {
         val cfg = _ui.value.config
         if (!cfg.isRunnable()) {
-            _ui.update { it.copy(message = "URL / 1차 문자열 / 2차 문자열을 모두 입력하세요.") }
+            _ui.update { it.copy(message = "1차 문자열과 2차 문자열을 모두 입력하세요.") }
             return
         }
         viewModelScope.launch {

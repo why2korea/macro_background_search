@@ -10,7 +10,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
-import android.webkit.CookieManager
 import com.why2korea.bgsearch.MainActivity
 import com.why2korea.bgsearch.data.HistoryItem
 import com.why2korea.bgsearch.data.SearchConfig
@@ -18,9 +17,9 @@ import com.why2korea.bgsearch.data.SettingsStore
 import com.why2korea.bgsearch.engine.EngineHost
 import com.why2korea.bgsearch.engine.OverlayMode
 import com.why2korea.bgsearch.engine.Phase
+import com.why2korea.bgsearch.engine.ScannerHolder
 import com.why2korea.bgsearch.engine.SearchBus
 import com.why2korea.bgsearch.engine.SearchEngine
-import com.why2korea.bgsearch.engine.WebController
 import com.why2korea.bgsearch.overlay.BubbleView
 import com.why2korea.bgsearch.overlay.OverlayActions
 import com.why2korea.bgsearch.overlay.OverlayManager
@@ -36,8 +35,8 @@ private const val TAG = "BgSearchService"
 /**
  * 플로팅 오버레이 + 탐색 루프를 소유하는 Foreground Service.
  *
- * 이 서비스가 살아 있는 동안 WebView 는 단 한 개만 존재하며 오버레이 윈도우 안에 상주한다.
- * Activity 는 설정 화면일 뿐이고, 탐색은 Activity 가 죽어도 계속된다.
+ * 화면을 읽고 조작하는 실제 작업은 ScanService(접근성 서비스)가 하고,
+ * 이 서비스는 오버레이 UI · 알림 · WakeLock · 루프 오케스트레이션을 담당한다.
  */
 class OverlayService : Service(), EngineHost, OverlayActions {
 
@@ -51,19 +50,15 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         const val ACTION_RELOAD_CONFIG = "com.why2korea.bgsearch.RELOAD_CONFIG"
         const val ACTION_EXIT = "com.why2korea.bgsearch.EXIT"
 
-        /** 오버레이를 띄우되 시작은 하지 않음 */
         fun showOverlay(ctx: Context) = send(ctx, ACTION_SHOW_OVERLAY)
-
-        /** 오버레이를 띄우고 탐색까지 시작 */
         fun startSearch(ctx: Context) = send(ctx, ACTION_START_SEARCH)
-
         fun stopSearch(ctx: Context) = send(ctx, ACTION_STOP_SEARCH)
         fun reloadConfig(ctx: Context) = send(ctx, ACTION_RELOAD_CONFIG)
         fun exit(ctx: Context) = send(ctx, ACTION_EXIT)
 
         /**
          * 서비스 스코프가 취소된 뒤에도 반드시 끝나야 하는 저장 작업용.
-         * (예: 종료 시 was_running=false 기록. 여기서 실패하면 다음 실행 때 잘못 복원된다.)
+         * (예: 종료 시 was_running=false 기록. 실패하면 다음 실행 때 잘못 복원된다.)
          */
         private val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -83,7 +78,6 @@ class OverlayService : Service(), EngineHost, OverlayActions {
 
     private lateinit var store: SettingsStore
     private lateinit var notifier: Notifier
-    private lateinit var web: WebController
     private lateinit var engine: SearchEngine
     private var overlay: OverlayManager? = null
 
@@ -106,37 +100,26 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         notifier.createChannels()
         ensureForeground(lastStatus)
 
-        web = WebController()
-        engine = SearchEngine(applicationContext, scope, web, this)
-
-        SearchBus.update { it.copy(serviceAlive = true) }
+        engine = SearchEngine(applicationContext, scope, this)
+        SearchBus.update { it.copy(serviceAlive = true, scannerReady = ScannerHolder.isReady()) }
 
         if (!Settings.canDrawOverlays(this)) {
-            // 권한 없이도 크래시 없이 살아 있다가, 권한이 생기면 다음 인텐트에서 붙는다.
             Log.w(TAG, "SYSTEM_ALERT_WINDOW not granted - overlay disabled")
             SearchBus.log("오버레이 권한이 없어 창을 띄우지 못했습니다.")
         }
+        if (!ScanService.isEnabled(this)) {
+            SearchBus.log("접근성 서비스가 꺼져 있습니다. 설정 > 접근성에서 켜주세요.")
+        }
 
         scope.launch {
-            config = try {
-                store.loadConfig()
-            } catch (e: Throwable) {
-                Log.w(TAG, "config load failed", e)
-                SearchConfig()
-            }
+            config = runCatching { store.loadConfig() }.getOrDefault(SearchConfig())
             setupOverlay()
-            // onStartCommand 가 기본 설정으로 먼저 오버레이를 만들었을 수 있으므로 여기서 다시 반영한다.
-            overlay?.keepFullSizeWhenCollapsed = config.keepFullSizeWhenCollapsed
+            overlay?.bubbleTapToggles = config.bubbleTapToggles
             restoreBubblePos()
-            // 프로세스가 죽었다 살아난 경우 루프 복원
-            val resume = try {
-                store.wasRunning()
-            } catch (e: Throwable) {
-                false
-            }
+            val resume = runCatching { store.wasRunning() }.getOrDefault(false)
             if (resume && config.isRunnable() && !engine.isRunning) {
                 SearchBus.log("프로세스 재시작 감지 - 이전 탐색을 복원합니다.")
-                doStartSearch()
+                doStartSearch(withCountdown = true)
             }
         }
 
@@ -156,8 +139,8 @@ class OverlayService : Service(), EngineHost, OverlayActions {
                 onExpand()
                 scope.launch {
                     config = runCatching { store.loadConfig() }.getOrDefault(config)
-                    overlay?.keepFullSizeWhenCollapsed = config.keepFullSizeWhenCollapsed
-                    doStartSearch()
+                    overlay?.bubbleTapToggles = config.bubbleTapToggles
+                    doStartSearch(withCountdown = true)
                 }
             }
 
@@ -169,13 +152,10 @@ class OverlayService : Service(), EngineHost, OverlayActions {
 
             ACTION_RELOAD_CONFIG -> scope.launch {
                 config = runCatching { store.loadConfig() }.getOrDefault(config)
-                overlay?.keepFullSizeWhenCollapsed = config.keepFullSizeWhenCollapsed
+                overlay?.bubbleTapToggles = config.bubbleTapToggles
             }
 
-            null -> {
-                // START_STICKY 재시작. onCreate 쪽 복원 로직이 처리한다.
-                Log.i(TAG, "restarted by system")
-            }
+            null -> Log.i(TAG, "restarted by system")
         }
         return START_STICKY
     }
@@ -193,15 +173,6 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         } catch (e: Throwable) {
             Log.w(TAG, "overlay destroy failed", e)
         }
-        try {
-            web.destroy()
-        } catch (e: Throwable) {
-            Log.w(TAG, "web destroy failed", e)
-        }
-        try {
-            CookieManager.getInstance().flush()
-        } catch (_: Throwable) {
-        }
         SearchBus.update {
             it.copy(serviceAlive = false, running = false, overlayMode = OverlayMode.HIDDEN)
         }
@@ -209,7 +180,7 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         super.onDestroy()
     }
 
-    // ------------------------------------------------------------------ 오버레이 구성
+    // ------------------------------------------------------------------ 오버레이
 
     private fun setupOverlay() {
         if (overlay != null) return
@@ -218,19 +189,7 @@ class OverlayService : Service(), EngineHost, OverlayActions {
             persistScope.launch { runCatching { store.saveBubblePos(x, y) } }
         }
         m.onCreate()
-        m.keepFullSizeWhenCollapsed = config.keepFullSizeWhenCollapsed
-        val view = try {
-            web.webView ?: web.createWebView(this)
-        } catch (e: Throwable) {
-            Log.e(TAG, "WebView 생성 실패", e)
-            SearchBus.log("WebView 생성 실패: ${e.message}")
-            null
-        }
-        if (view == null) return
-        if (!m.installWebView(view)) {
-            SearchBus.log("오버레이 창을 붙이지 못했습니다. 권한을 확인하세요.")
-            return
-        }
+        m.bubbleTapToggles = config.bubbleTapToggles
         overlay = m
         // 기본 표시 상태는 버블(축소). 패널이 필요하면 호출부가 expand() 한다.
         m.collapse()
@@ -244,51 +203,71 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         }
     }
 
-    /** 상태에 따라 버블 색/뱃지를 갱신한다. */
+    /** 상태에 따라 버블 색/뱃지/글자를 갱신한다. */
     private fun watchBubbleState() {
         bubbleWatcher?.cancel()
         bubbleWatcher = scope.launch {
             SearchBus.snapshot.collect { s ->
                 val color = when {
                     s.phase == Phase.PAUSED_FOUND -> BubbleView.COLOR_FOUND
-                    s.phase == Phase.ERROR -> BubbleView.COLOR_PAUSED
+                    s.phase == Phase.NO_SERVICE || s.phase == Phase.ERROR -> BubbleView.COLOR_PAUSED
+                    s.phase == Phase.COUNTDOWN -> BubbleView.COLOR_PAUSED
                     s.running -> BubbleView.COLOR_RUNNING
                     else -> BubbleView.COLOR_IDLE
                 }
                 overlay?.setBubbleColor(color)
                 overlay?.setBubbleBadge(if (config.notifyBubble) s.foundCount else 0)
+                overlay?.setBubbleLabel(
+                    if (s.phase == Phase.COUNTDOWN && s.countdown > 0) s.countdown.toString() else "S"
+                )
             }
         }
     }
 
     // ------------------------------------------------------------------ 탐색 제어
 
-    private suspend fun doStartSearch() {
+    private suspend fun doStartSearch(withCountdown: Boolean) {
         if (engine.isRunning) return
         if (!config.isRunnable()) {
-            SearchBus.log("URL / 1차 문자열 / 2차 문자열을 모두 입력하세요.")
+            SearchBus.log("1차 문자열과 2차 문자열을 모두 입력하세요.")
             SearchBus.update { it.copy(status = "입력값이 부족합니다") }
             notifier.notifyOngoing("입력값이 부족합니다", running = false)
             return
         }
+        if (!ScanService.isEnabled(this)) {
+            SearchBus.log("접근성 서비스가 꺼져 있어 시작할 수 없습니다. 설정 > 접근성에서 켜주세요.")
+            SearchBus.update { it.copy(status = "접근성 서비스 꺼짐", phase = Phase.NO_SERVICE) }
+            notifier.notifyWarn("접근성 서비스가 꺼져 있습니다. 설정 > 접근성 > 설치된 앱에서 켜주세요.")
+            return
+        }
         runCatching {
             store.setRunning(true)
-            store.addHistory(
-                HistoryItem(config.normalizedUrl(), config.primaryText, config.secondaryTexts)
-            )
+            store.addHistory(HistoryItem(config.primaryText, config.secondaryTexts))
         }
         acquireWakeLock()
-        engine.start(config)
-        notifier.notifyOngoing("탐색 시작", running = true)
+        engine.start(config, withCountdown)
+        notifier.notifyOngoing(if (withCountdown) "곧 시작합니다" else "탐색 시작", running = true)
     }
 
     // ------------------------------------------------------------------ OverlayActions
 
-    override fun onStart() {
+    override fun onStartWithCountdown() {
         scope.launch {
             config = runCatching { store.loadConfig() }.getOrDefault(config)
-            overlay?.keepFullSizeWhenCollapsed = config.keepFullSizeWhenCollapsed
-            doStartSearch()
+            overlay?.bubbleTapToggles = config.bubbleTapToggles
+            doStartSearch(withCountdown = true)
+        }
+    }
+
+    override fun onToggleFromBubble() {
+        if (engine.isRunning) {
+            onStop()
+            return
+        }
+        scope.launch {
+            config = runCatching { store.loadConfig() }.getOrDefault(config)
+            // 버블 탭은 이미 대상 앱을 보고 있는 상태이므로 카운트다운 없이 바로 시작한다.
+            doStartSearch(withCountdown = false)
         }
     }
 
@@ -354,12 +333,11 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         notifier.notifyOngoing(message, running = SearchBus.snapshot.value.running)
     }
 
-    override fun onFound(texts: List<String>, url: String, timeText: String, shotPath: String?) {
+    override fun onFound(texts: List<String>, timeText: String, shotPath: String?) {
         val cfg = config
-        if (cfg.notifySystem) notifier.notifyFound(texts, url, timeText, cfg.notifySound)
+        if (cfg.notifySystem) notifier.notifyFound(texts, timeText, cfg.notifySound)
         if (cfg.notifyVibrate) notifier.vibrate()
         if (cfg.notifyBanner) overlay?.showBanner()
-        // 버블 색/뱃지는 watchBubbleState() 가 스냅샷 변화로 자동 반영한다.
         notifier.notifyOngoing("발견됨 - 일시정지 (계속 누르면 재개)", running = true)
     }
 
@@ -368,14 +346,17 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         overlay?.hideBanner()
     }
 
-    override fun onWarn(message: String) {
-        notifier.notifyWarn(message)
-    }
+    override fun onWarn(message: String) = notifier.notifyWarn(message)
 
     override fun onLoopFinished(reason: String) {
         notifier.notifyOngoing("정지됨 ($reason)", running = false)
         releaseWakeLock()
         persistScope.launch { runCatching { store.setRunning(false) } }
+    }
+
+    /** 카운트다운 시작 시 패널을 접어 대상 앱이 보이게 한다. */
+    override fun onNeedCollapse() {
+        onCollapse()
     }
 
     // ------------------------------------------------------------------ Foreground / WakeLock
