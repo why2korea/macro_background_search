@@ -121,8 +121,10 @@ class Notifier(private val ctx: Context) {
         buildOngoing(status, running)
     }
 
-    fun notifyFound(texts: List<String>, timeText: String, sound: Boolean) {
-        val body = texts.joinToString(", ") + "\n" + timeText
+    fun notifyFound(texts: List<String>, rowText: String, timeText: String, sound: Boolean) {
+        val body = texts.joinToString(", ") +
+            (if (rowText.isBlank()) "" else "\n\n[줄] " + rowText.take(120)) +
+            "\n" + timeText
         val b = NotificationCompat.Builder(ctx, CHANNEL_FOUND)
             .setSmallIcon(R.drawable.ic_stat_search)
             .setContentTitle("문자열 발견!")

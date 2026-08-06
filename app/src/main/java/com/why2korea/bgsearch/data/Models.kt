@@ -11,8 +11,21 @@ data class SearchConfig(
     val primaryText: String = "",
     /** 클릭 후 스크롤하며 찾을 문자열 목록 (N개) */
     val secondaryTexts: List<String> = emptyList(),
-    /** false = OR(하나라도 발견 시 알림), true = AND(전부 발견해야 알림) */
+    /** 2차 문자열 매칭. false = OR(같은 줄에 하나라도), true = AND(같은 줄에 전부) */
     val matchAll: Boolean = false,
+
+    /**
+     * 3차 문자열 목록 (선택).
+     * 비어 있지 않으면 **2차 문자열이 발견된 그 줄 안에** 이 중 하나가 더 있어야 발견으로 친다.
+     * 예) 2차 "09일" + 3차 "예약가능" → "09일" 이 있는 줄에 "예약가능" 도 있어야 알림
+     */
+    val tertiaryTexts: List<String> = emptyList(),
+
+    /** 발견한 줄을 한 번 클릭한 뒤에 알림 처리할지 (기본 켬) */
+    val clickFoundRow: Boolean = true,
+
+    /** 새로고침이 실패했을 때 뒤로가기로 이전 화면에 복귀할지 (기본 켬) */
+    val backOnRefreshFail: Boolean = true,
 
     /** 스크롤 1스텝 크기 (화면 높이 대비 비율) */
     val scrollRatio: Float = 0.6f,
@@ -40,13 +53,20 @@ data class SearchConfig(
 ) {
     fun secondaries(): List<String> = secondaryTexts.filter { it.isNotBlank() }
 
+    fun tertiaries(): List<String> = tertiaryTexts.filter { it.isNotBlank() }
+
     fun isRunnable(): Boolean = primaryText.isNotBlank() && secondaries().isNotEmpty()
 }
 
 /** 최근 입력 히스토리 1건. */
 data class HistoryItem(
     val primaryText: String,
-    val secondaryTexts: List<String>
+    val secondaryTexts: List<String>,
+    val tertiaryTexts: List<String> = emptyList()
 ) {
-    fun label(): String = primaryText + " > " + secondaryTexts.joinToString(", ")
+    fun label(): String {
+        val base = primaryText + " > " + secondaryTexts.joinToString(", ")
+        return if (tertiaryTexts.isEmpty()) base
+        else base + " + " + tertiaryTexts.joinToString(", ")
+    }
 }

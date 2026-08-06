@@ -23,6 +23,7 @@ private const val TAG = "BgSearchSetupVM"
 data class SetupUiState(
     val config: SearchConfig = SearchConfig(),
     val newSecondary: String = "",
+    val newTertiary: String = "",
     val history: List<HistoryItem> = emptyList(),
     val advancedOpen: Boolean = false,
     val notifyOpen: Boolean = false,
@@ -112,7 +113,34 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         it.copy(secondaryTexts = list)
     }
 
+    fun onNewTertiaryChange(v: String) = _ui.update { it.copy(newTertiary = v) }
+
+    fun addTertiary() {
+        val text = _ui.value.newTertiary.trim()
+        if (text.isBlank()) return
+        if (_ui.value.config.tertiaryTexts.any { it.equals(text, ignoreCase = true) }) {
+            _ui.update { it.copy(newTertiary = "", message = "이미 있는 문자열입니다") }
+            return
+        }
+        _ui.update {
+            it.copy(
+                config = it.config.copy(tertiaryTexts = it.config.tertiaryTexts + text),
+                newTertiary = "",
+                message = ""
+            )
+        }
+        scheduleSave()
+    }
+
+    fun removeTertiary(index: Int) = mutate {
+        val list = it.tertiaryTexts.toMutableList()
+        if (index in list.indices) list.removeAt(index)
+        it.copy(tertiaryTexts = list)
+    }
+
     fun setMatchAll(v: Boolean) = mutate { it.copy(matchAll = v) }
+    fun setClickFoundRow(v: Boolean) = mutate { it.copy(clickFoundRow = v) }
+    fun setBackOnRefreshFail(v: Boolean) = mutate { it.copy(backOnRefreshFail = v) }
     fun setRatio(v: Float) = mutate { it.copy(scrollRatio = v.coerceIn(0.1f, 1.2f)) }
     fun setStepDelay(v: Long) = mutate { it.copy(stepDelayMs = v.coerceIn(200L, 30_000L)) }
     fun setStartDelay(v: Long) = mutate { it.copy(startDelayMs = v.coerceIn(1_000L, 60_000L)) }
@@ -133,7 +161,11 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleNotify() = _ui.update { it.copy(notifyOpen = !it.notifyOpen) }
 
     fun applyHistory(h: HistoryItem) = mutate {
-        it.copy(primaryText = h.primaryText, secondaryTexts = h.secondaryTexts)
+        it.copy(
+            primaryText = h.primaryText,
+            secondaryTexts = h.secondaryTexts,
+            tertiaryTexts = h.tertiaryTexts
+        )
     }
 
     fun clearMessage() = _ui.update { it.copy(message = "") }

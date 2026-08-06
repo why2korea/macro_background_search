@@ -17,6 +17,8 @@ import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import com.why2korea.bgsearch.engine.ClickResult
+import com.why2korea.bgsearch.engine.RefreshResult
+import com.why2korea.bgsearch.engine.RowHit
 import com.why2korea.bgsearch.engine.ScannerHolder
 import com.why2korea.bgsearch.engine.ScreenScanner
 import com.why2korea.bgsearch.engine.ScreenSnapshotInfo
@@ -51,6 +53,21 @@ class ScanService : AccessibilityService(), ScreenScanner {
         /** 노드 트리 순회 상한. 비정상적으로 큰 화면에서 폭주하지 않게 한다. */
         private const val MAX_NODES = 4000
         private const val MAX_CLICK_ANCESTOR_DEPTH = 12
+
+        /** "줄" 후보를 찾을 때 올라갈 조상 최대 깊이 */
+        private const val MAX_ROW_ANCESTOR_DEPTH = 10
+
+        /**
+         * 조상 노드를 "줄"로 인정하는 최대 높이 (화면 높이 대비).
+         * 이걸 두지 않으면 3차 문자열이 화면 아무 데나 있어도
+         * 최상위 컨테이너가 둘 다 포함한다는 이유로 같은 줄로 오인한다.
+         */
+        private const val ROW_MAX_HEIGHT_RATIO = 0.30f
+
+        /** 새로고침 컨트롤로 인정할 텍스트 (정규화 후 부분 일치) */
+        private val REFRESH_LABELS = listOf(
+            "새로고침", "새로 고침", "refresh", "reload", "다시 시도", "다시시도", "재시도"
+        )
 
         /** 접근성 서비스가 설정에서 켜져 있는지 확인. */
         fun isEnabled(ctx: Context): Boolean {
@@ -320,6 +337,146 @@ class ScanService : AccessibilityService(), ScreenScanner {
         ClickResult(true, ok, if (ok) "gesture-tap" else "none", snippet)
     }
 
+    // ------------------------------------------------------------------ 줄(row) 매칭
+
+    /** 노드 아래 전체 텍스트를 정규화해 합친다. */
+    private fun allTextUnder(node: AccessibilityNodeInfo): String {
+        val sb = StringBuilder()
+        forEachNode(node) { n ->
+            val t = nodeText(n)
+            if (t.isNotEmpty()) {
+                sb.append(t).append(' ')
+            }
+            false
+        }
+        return TextNorm.of(sb)
+    }
+
+    /** 2차 문자열 중 하나라도 포함하는 가장 안쪽 노드들. */
+    private fun innermostNodesContainingAny(
+        root: AccessibilityNodeInfo,
+        needles: List<String>
+    ): List<AccessibilityNodeInfo> {
+        val out = ArrayList<AccessibilityNodeInfo>()
+        forEachNode(root) { n ->
+            val t = TextNorm.of(nodeText(n))
+            if (t.isEmpty()) return@forEachNode false
+            if (needles.none { t.contains(it) }) return@forEachNode false
+            // 자식이 같은 문자열을 가지면 더 안쪽이 있으므로 건너뛴다
+            var deeper = false
+            val count = try {
+                n.childCount
+            } catch (e: Throwable) {
+                0
+            }
+            for (i in 0 until count) {
+                val c = try {
+                    n.getChild(i)
+                } catch (e: Throwable) {
+                    null
+                } ?: continue
+                val ct = TextNorm.of(nodeText(c))
+                if (needles.any { ct.contains(it) }) {
+                    deeper = true
+                    break
+                }
+            }
+            if (!deeper) out.add(n)
+            false
+        }
+        return out
+    }
+
+    override suspend fun findRowAndClick(
+        secondaries: List<String>,
+        matchAllSecondary: Boolean,
+        tertiaries: List<String>,
+        doClick: Boolean
+    ): RowHit? = withContext(Dispatchers.Main) {
+        val sec = secondaries.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
+        if (sec.isEmpty()) return@withContext null
+        val ter = tertiaries.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
+        val maxRowHeight = screenHeight() * ROW_MAX_HEIGHT_RATIO
+
+        for (root in rootNodes()) {
+            for (seed in innermostNodesContainingAny(root, sec)) {
+                var cur: AccessibilityNodeInfo? = seed
+                var depth = 0
+                while (cur != null && depth <= MAX_ROW_ANCESTOR_DEPTH) {
+                    val r = Rect()
+                    try {
+                        cur.getBoundsInScreen(r)
+                    } catch (e: Throwable) {
+                    }
+                    // 화면 대부분을 차지하는 컨테이너는 "줄"이 아니다.
+                    if (r.height() in 1..maxRowHeight.toInt()) {
+                        val rowText = allTextUnder(cur)
+                        val secHit = sec.filter { rowText.contains(it) }
+                        val secOk =
+                            if (matchAllSecondary) secHit.size == sec.size else secHit.isNotEmpty()
+                        val terHit = ter.filter { rowText.contains(it) }
+                        val terOk = ter.isEmpty() || terHit.isNotEmpty()
+
+                        if (secOk && terOk) {
+                            val row = cur
+                            var clicked = false
+                            var method = "skipped"
+                            if (doClick) {
+                                val res = clickNodeOrGesture(row)
+                                clicked = res.first
+                                method = res.second
+                            }
+                            return@withContext RowHit(
+                                secondaryMatched = mapBack(secondaries, secHit),
+                                tertiaryMatched = mapBack(tertiaries, terHit),
+                                rowText = rowText.take(120),
+                                clicked = clicked,
+                                clickMethod = method
+                            )
+                        }
+                    }
+                    cur = try {
+                        cur.parent
+                    } catch (e: Throwable) {
+                        null
+                    }
+                    depth++
+                }
+            }
+        }
+        null
+    }
+
+    /** 정규화된 매칭 결과를 사용자가 입력한 원본 문자열로 되돌린다. */
+    private fun mapBack(originals: List<String>, matchedNorm: List<String>): List<String> =
+        originals.filter { o ->
+            val n = TextNorm.of(o)
+            n.isNotEmpty() && matchedNorm.contains(n)
+        }
+
+    /** 노드(또는 클릭 가능한 조상)를 클릭. 실패하면 좌표 탭 제스처. */
+    private suspend fun clickNodeOrGesture(node: AccessibilityNodeInfo): Pair<Boolean, String> {
+        val target = clickableAncestor(node)
+        if (target != null) {
+            val ok = try {
+                target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (e: Throwable) {
+                Log.w(TAG, "ACTION_CLICK failed", e)
+                false
+            }
+            if (ok) return true to "ACTION_CLICK"
+        }
+        val r = Rect()
+        try {
+            node.getBoundsInScreen(r)
+        } catch (e: Throwable) {
+            return false to "none"
+        }
+        if (r.width() <= 0 || r.height() <= 0) return false to "none"
+        val ok = tap(r.exactCenterX(), r.exactCenterY())
+        return ok to if (ok) "gesture-tap" else "none"
+    }
+
     // ------------------------------------------------------------------ 스크롤
 
     /** 스크롤 가능한 노드 중 화면에서 가장 큰 것 */
@@ -408,15 +565,89 @@ class ScanService : AccessibilityService(), ScreenScanner {
         true
     }
 
+    // ------------------------------------------------------------------ 새로고침
+
     /**
-     * 당겨서 새로고침.
-     * 화면 위쪽에서 아래로 천천히 길게 끌어내린다. (일반적인 pull-to-refresh 동작)
+     * 페이지를 실제로 새로고침한다.
+     *
+     * 제스처를 보낸 것만으로 성공으로 치지 않는다. 새로고침이 일어나면 화면이 잠깐
+     * 비거나 다시 그려지므로, 트리거 직후 화면을 계속 관찰해 그 변화를 확인한다.
+     * 확인되지 않으면 다음 방법으로 넘어간다.
+     *
+     *  1) 화면에 있는 명시적 새로고침 컨트롤 클릭
+     *  2) 당겨서 새로고침 제스처 (크롬·삼성인터넷은 기본 지원)
+     *
+     * 둘 다 실패하면 ok=false 를 돌려주고, 뒤로가기 복귀는 호출자(엔진)가 판단한다.
      */
-    override suspend fun pullToRefresh(): Boolean = withContext(Dispatchers.Main) {
+    override suspend fun refreshPage(waitMs: Long): RefreshResult = withContext(Dispatchers.Main) {
+        scrollToTop(30)
+        delay(300)
+
+        // 1) 명시적 새로고침 컨트롤
+        val control = findRefreshControl()
+        if (control != null) {
+            val before = snapshotInfo()
+            clickNodeOrGesture(control)
+            if (awaitReload(before, 4_000)) {
+                delay(waitMs)
+                return@withContext RefreshResult(true, "refresh-control", "새로고침 버튼 클릭")
+            }
+            Log.i(TAG, "refresh control clicked but no reload detected")
+        }
+
+        // 2) 당겨서 새로고침 (느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다)
+        val before = snapshotInfo()
         val h = screenHeight()
         val w = screenWidth()
-        // 느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다.
-        swipe(w * 0.5f, h * 0.22f, w * 0.5f, h * 0.78f, 700)
+        swipe(w * 0.5f, h * 0.18f, w * 0.5f, h * 0.82f, 700)
+        if (awaitReload(before, 5_000)) {
+            delay(waitMs)
+            return@withContext RefreshResult(true, "pull-to-refresh", "당겨서 새로고침")
+        }
+
+        RefreshResult(false, "none", "새로고침이 확인되지 않음")
+    }
+
+    /**
+     * 새로고침이 실제로 일어났는지 관찰한다.
+     * 로딩 중에는 노드가 사라졌다가 다시 채워지므로, 내용 해시가 달라지거나
+     * 노드 수가 절반 이하로 떨어지는 순간을 잡는다.
+     */
+    private suspend fun awaitReload(before: ScreenSnapshotInfo, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            delay(250)
+            val now = snapshotInfo()
+            if (now.contentHash != before.contentHash) return true
+            if (before.nodeCount > 4 && now.nodeCount <= before.nodeCount / 2) return true
+        }
+        return false
+    }
+
+    /** 화면에서 새로고침 버튼처럼 보이는 노드를 찾는다. */
+    private fun findRefreshControl(): AccessibilityNodeInfo? {
+        for (root in rootNodes()) {
+            var hit: AccessibilityNodeInfo? = null
+            forEachNode(root) { n ->
+                val t = TextNorm.of(nodeText(n))
+                if (t.isEmpty() || t.length > 20) return@forEachNode false
+                if (REFRESH_LABELS.none { t.contains(TextNorm.of(it)) }) return@forEachNode false
+                val visible = try {
+                    n.isVisibleToUser
+                } catch (e: Throwable) {
+                    true
+                }
+                if (visible && clickableAncestor(n) != null) {
+                    hit = n
+                    true
+                } else {
+                    false
+                }
+            }
+            val found = hit
+            if (found != null) return found
+        }
+        return null
     }
 
     override suspend fun pressBack(): Boolean = withContext(Dispatchers.Main) {

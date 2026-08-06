@@ -21,6 +21,34 @@ data class ClickResult(
 )
 
 /**
+ * 2차(+3차) 문자열이 같은 줄에서 발견된 결과.
+ *
+ * "줄" = 조건을 모두 만족하는 **가장 작은 조상 노드**.
+ * 3차 문자열이 화면 다른 곳에 있는 것을 같은 줄로 오인하지 않도록
+ * 조상의 높이가 화면의 일정 비율 이하일 때만 줄로 인정한다.
+ */
+data class RowHit(
+    /** 이 줄에서 발견된 2차 문자열들 */
+    val secondaryMatched: List<String>,
+    /** 이 줄에서 발견된 3차 문자열들 (3차 미설정이면 빈 목록) */
+    val tertiaryMatched: List<String>,
+    /** 줄 전체 텍스트 (로그·알림용, 앞부분만) */
+    val rowText: String,
+    val clicked: Boolean,
+    /** ACTION_CLICK / gesture-tap / skipped / none */
+    val clickMethod: String
+)
+
+/** 새로고침 시도 결과. */
+data class RefreshResult(
+    /** 실제로 새로고침이 일어난 것으로 확인됐는지 */
+    val ok: Boolean,
+    /** refresh-control / pull-to-refresh / none */
+    val method: String,
+    val detail: String = ""
+)
+
+/**
  * "지금 화면에 떠 있는 다른 앱"을 읽고 조작하는 기능의 추상화.
  * 실제 구현은 접근성 서비스(ScanService)가 제공한다.
  */
@@ -41,14 +69,32 @@ interface ScreenScanner {
     /** 1차 문자열을 찾아 클릭 */
     suspend fun clickText(text: String): ClickResult
 
+    /**
+     * 2차 문자열이 있는 "줄"을 찾는다. 3차 문자열이 주어지면 같은 줄에 그것까지 있어야 한다.
+     * 찾으면 [doClick] 이 true 일 때 그 줄을 한 번 클릭한다.
+     *
+     * @param matchAllSecondary true 면 한 줄에 2차 문자열이 전부 있어야 한다
+     * @return 조건을 만족하는 줄이 없으면 null
+     */
+    suspend fun findRowAndClick(
+        secondaries: List<String>,
+        matchAllSecondary: Boolean,
+        tertiaries: List<String>,
+        doClick: Boolean
+    ): RowHit?
+
     /** 한 스텝 아래로 스크롤. 실제로 내려갔으면 true */
     suspend fun scrollDown(ratio: Float): Boolean
 
     /** 화면을 맨 위로 올린다 */
     suspend fun scrollToTop(maxSteps: Int): Boolean
 
-    /** 당겨서 새로고침 (위에서 아래로 길게 끌어내리는 제스처) */
-    suspend fun pullToRefresh(): Boolean
+    /**
+     * 현재 페이지를 실제로 새로고침한다.
+     * 제스처를 보내는 것으로 끝내지 않고, 화면이 실제로 다시 그려졌는지 확인한다.
+     * 한 방법이 실패하면 다음 방법으로 넘어간다.
+     */
+    suspend fun refreshPage(waitMs: Long): RefreshResult
 
     /** 뒤로가기 */
     suspend fun pressBack(): Boolean

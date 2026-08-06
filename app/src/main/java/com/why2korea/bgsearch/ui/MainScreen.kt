@@ -25,6 +25,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -261,9 +262,56 @@ private fun InputCard(state: SetupUiState, vm: SetupViewModel) {
             }
 
             SwitchRow(
-                label = if (cfg.matchAll) "AND 매칭 (전부 발견해야 알림)" else "OR 매칭 (하나라도 발견하면 알림)",
+                label = if (cfg.matchAll) "AND 매칭 (한 줄에 2차 문자열이 전부)"
+                else "OR 매칭 (한 줄에 2차 문자열이 하나라도)",
                 checked = cfg.matchAll,
                 onChange = vm::setMatchAll
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            Text(
+                "3차 문자열 목록 (${cfg.tertiaryTexts.size}개, 선택)",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
+            Text(
+                "설정하면 2차 문자열이 발견된 **그 줄 안에** 이 중 하나가 더 있어야 발견으로 칩니다. " +
+                    "비워두면 사용하지 않습니다.",
+                fontSize = 11.sp,
+                color = Color(0xFF757575)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = state.newTertiary,
+                    onValueChange = vm::onNewTertiaryChange,
+                    label = { Text("같은 줄에서 확인할 문자열") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(onClick = { vm.addTertiary() }) { Text("추가") }
+            }
+            cfg.tertiaryTexts.forEachIndexed { idx, t ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("${idx + 1}. $t", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { vm.removeTertiary(idx) }) {
+                        Text("삭제", fontSize = 12.sp, color = Color(0xFFC62828))
+                    }
+                }
+            }
+
+            SwitchRow(
+                label = "발견한 줄을 클릭한 뒤 알림",
+                checked = cfg.clickFoundRow,
+                onChange = vm::setClickFoundRow
             )
 
             Box {
@@ -319,6 +367,17 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                     label = "버블 탭으로 시작/정지 (끄면 탭 = 패널 열기)",
                     checked = cfg.bubbleTapToggles,
                     onChange = vm::setBubbleTapToggles
+                )
+                SwitchRow(
+                    label = "새로고침 실패 시 뒤로가기로 복귀",
+                    checked = cfg.backOnRefreshFail,
+                    onChange = vm::setBackOnRefreshFail
+                )
+                Text(
+                    "새로고침 버튼·당겨서 새로고침이 모두 확인되지 않으면 뒤로가기로 이전 화면에 " +
+                        "돌아가 1차 문자열 클릭부터 다시 탑니다.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
                 )
             }
         }

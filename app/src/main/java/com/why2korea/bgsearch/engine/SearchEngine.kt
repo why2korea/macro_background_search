@@ -22,7 +22,7 @@ private const val TAG = "BgSearchEngine"
 /** 엔진이 바깥(서비스)에 알리는 이벤트. */
 interface EngineHost {
     fun onStatus(message: String)
-    fun onFound(texts: List<String>, timeText: String, shotPath: String?)
+    fun onFound(texts: List<String>, rowText: String, timeText: String, shotPath: String?)
     fun onFoundCleared()
     fun onWarn(message: String)
     fun onLoopFinished(reason: String)
@@ -38,9 +38,10 @@ interface EngineHost {
  * 루프 (사용자가 중지할 때까지 무한 반복)
  *   0. [시작] → 버블로 축소 + 카운트다운 (대상 앱으로 이동할 시간)
  *   1. 현재 화면에서 1차 문자열 탐색 → 없으면 스크롤하며 계속 → 발견 시 클릭
- *   2. 클릭 후 전환된 화면에서 스크롤 내리며 2차 문자열 목록 탐색
- *   3. 발견 → 즉시 알림 → 일시정지 (resume() 시 재개)
- *   4. 바닥까지 미발견 → 맨 위로 → 당겨서 새로고침 → 대기 → 1번으로 복귀
+ *   2. 클릭 후 전환된 화면에서 스크롤 내리며 2차 문자열이 있는 "줄"을 탐색
+ *      3차 문자열이 설정돼 있으면 같은 줄에 그것까지 있어야 발견으로 친다
+ *   3. 그 줄을 한 번 클릭 → 알림 → 일시정지 (resume() 시 재개)
+ *   4. 바닥까지 미발견 → 페이지 새로고침(실제 반영 확인) → 대기 → 1번으로 복귀
  */
 class SearchEngine(
     private val appCtx: Context,
@@ -53,6 +54,9 @@ class SearchEngine(
         const val MAX_STEPS_PER_PHASE = 400
         const val AFTER_CLICK_WAIT_MS = 1_500L
         const val PRIMARY_FAIL_WARN_AT = 5
+        const val REFRESH_FAIL_WARN_AT = 5
+        /** 줄 클릭 후 화면이 바뀔 시간을 준 뒤 캡처한다 */
+        const val AFTER_ROW_CLICK_WAIT_MS = 1_200L
         const val BOTTOM_STABLE_COUNT = 3
         const val SCROLL_TO_TOP_MAX = 40
         const val SHOT_DELAY_MS = 400L
@@ -69,6 +73,7 @@ class SearchEngine(
     private var tickerJob: Job? = null
     private var startedAtMs: Long = 0L
     private var primaryFailStreak = 0
+    private var refreshFailStreak = 0
 
     @Volatile
     private var resumeSignal: CompletableDeferred<Boolean>? = null
@@ -212,17 +217,17 @@ class SearchEngine(
                 SearchBus.update { it.copy(phase = Phase.AFTER_CLICK) }
                 delay(AFTER_CLICK_WAIT_MS)
 
-                // ---------------- 3. 스크롤하며 2차 문자열 탐색
+                // ---------------- 3. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.SCAN_SECONDARY) }
-                val matched = scanSecondaryWhileScrolling(scanner, round, cfg)
+                val hit = scanRowWhileScrolling(scanner, round, cfg)
 
-                if (matched.isNotEmpty()) {
+                if (hit != null) {
                     // ---------------- 4. 발견 → 알림 후 일시정지
-                    if (!onFound(scanner, matched, cfg)) return
+                    if (!onFound(scanner, hit, cfg)) return
                     continue
                 }
 
-                // ---------------- 5. 미발견 → 맨 위로 + 당겨서 새로고침 → 1차부터 재시작
+                // ---------------- 5. 미발견 → 페이지 새로고침 → 1차부터 재시작
                 refreshAndRestart(scanner, "2차 문자열 미발견")
             }
         } catch (e: CancellationException) {
@@ -304,34 +309,47 @@ class SearchEngine(
     }
 
     /**
-     * 스크롤을 한 스텝씩 내리며 2차 문자열 목록을 탐색한다.
-     * 접근성 노드는 화면에 보이는 것만 읽히므로, 매 스텝의 매칭 결과를 누적해
-     * AND 매칭이 서로 다른 스크롤 위치에서 걸려도 판정되게 한다.
+     * 스크롤을 한 스텝씩 내리며 2차(+3차) 문자열이 있는 "줄"을 찾는다.
+     *
+     * 접근성 노드는 화면에 보이는 것만 읽히므로 줄 판정도 매 스텝마다 새로 한다.
+     * 조건을 만족하는 줄을 찾으면 그 줄을 한 번 클릭한 뒤 결과를 돌려준다.
      */
-    private suspend fun scanSecondaryWhileScrolling(
+    private suspend fun scanRowWhileScrolling(
         scanner: ScreenScanner,
         round: Int,
         cfg: SearchConfig
-    ): List<String> {
+    ): RowHit? {
         val wanted = cfg.secondaries()
-        if (wanted.isEmpty()) return emptyList()
+        if (wanted.isEmpty()) return null
+        val extra = cfg.tertiaries()
 
-        val hits = LinkedHashSet<String>()
         var step = 0
         var stable = 0
         var lastHash = Int.MIN_VALUE
 
-        fun satisfied(): Boolean =
-            if (cfg.matchAll) hits.size >= wanted.size else hits.isNotEmpty()
-
         while (scope.isActive && step < MAX_STEPS_PER_PHASE) {
-            hits.addAll(scanner.matchOnScreen(wanted))
-            if (satisfied()) return hits.toList()
+            val hit = scanner.findRowAndClick(wanted, cfg.matchAll, extra, cfg.clickFoundRow)
+            if (hit != null) {
+                log(
+                    "줄 발견: [${hit.secondaryMatched.joinToString(",")}]" +
+                        (if (extra.isEmpty()) "" else " + [${hit.tertiaryMatched.joinToString(",")}]") +
+                        " · \"${hit.rowText.take(60)}\""
+                )
+                log(
+                    if (!cfg.clickFoundRow) "줄 클릭 안 함 (설정 꺼짐)"
+                    else if (hit.clicked) "줄 클릭 성공 [${hit.clickMethod}]"
+                    else "줄 클릭 실패 - 알림은 그대로 진행"
+                )
+                return hit
+            }
 
             val moved = scanner.scrollDown(cfg.scrollRatio)
             step++
             SearchBus.update { it.copy(step = step) }
-            status("라운드 $round · 2차 스캔 (스크롤 $step, 매칭 ${hits.size}/${wanted.size})")
+            status(
+                "라운드 $round · 2차 스캔 (스크롤 $step)" +
+                    if (extra.isEmpty()) "" else " · 3차 조건 있음"
+            )
             delay(cfg.stepDelayMs)
 
             val h = scanner.snapshotInfo().contentHash
@@ -347,37 +365,65 @@ class SearchEngine(
             lastHash = h
         }
 
-        hits.addAll(scanner.matchOnScreen(wanted))
-        return if (satisfied()) hits.toList() else emptyList()
+        // 마지막으로 한 번 더
+        return scanner.findRowAndClick(wanted, cfg.matchAll, extra, cfg.clickFoundRow)
     }
 
     /**
-     * 미발견 처리: 화면을 맨 위로 올린 뒤 당겨서 새로고침하고, 대기 후 1차 탐색부터 다시 시작한다.
-     * (URL 이 없어 페이지 리로드를 할 수 없으므로 사용자가 손으로 하듯 제스처로 새로고침한다)
+     * 미발견 처리: 페이지를 **실제로** 새로고침한 뒤 1차 탐색부터 다시 시작한다.
+     *
+     * 제스처를 보낸 것만으로 성공으로 치지 않는다. ScanService 가 화면이 실제로 다시
+     * 그려졌는지 확인하고, 방법을 바꿔가며 재시도한다. 그래도 안 되면 뒤로가기로
+     * 이전 화면에 복귀해 1차 클릭부터 다시 타게 한다. (목록→상세 구조에서 사실상 재조회)
      */
     private suspend fun refreshAndRestart(scanner: ScreenScanner, reason: String) {
         SearchBus.update { it.copy(phase = Phase.REFRESHING) }
-        log("$reason - 맨 위로 이동 후 당겨서 새로고침")
-
-        status("맨 위로 이동 중")
-        try {
-            scanner.scrollToTop(SCROLL_TO_TOP_MAX)
-        } catch (e: Throwable) {
-            Log.w(TAG, "scrollToTop failed", e)
-        }
-        delay(400)
-
-        status("당겨서 새로고침")
-        val ok = try {
-            scanner.pullToRefresh()
-        } catch (e: Throwable) {
-            Log.w(TAG, "pullToRefresh failed", e)
-            false
-        }
-        log(if (ok) "새로고침 제스처 전송됨" else "새로고침 제스처 실패 - 그대로 진행")
-
         val wait = config.refreshWaitMs.coerceAtLeast(MIN_REFRESH_MS)
-        status("새로고침 대기 ${wait / 1000}초")
+        status("$reason - 새로고침 중")
+
+        var result = try {
+            scanner.refreshPage(wait)
+        } catch (e: Throwable) {
+            Log.w(TAG, "refreshPage failed", e)
+            RefreshResult(false, "none", e.message ?: "error")
+        }
+
+        // 1회 재시도: 첫 시도가 타이밍 문제로 실패하는 경우가 있다.
+        if (!result.ok && scope.isActive) {
+            log("새로고침 미확인 - 한 번 더 시도")
+            delay(800)
+            result = try {
+                scanner.refreshPage(wait)
+            } catch (e: Throwable) {
+                RefreshResult(false, "none", e.message ?: "error")
+            }
+        }
+
+        if (result.ok) {
+            log("새로고침 확인됨 [${result.method}]")
+            refreshFailStreak = 0
+            return
+        }
+
+        // 새로고침이 끝내 확인되지 않았다 → 뒤로가기로 복귀해 1차부터 다시 탄다
+        refreshFailStreak++
+        log("새로고침 확인 실패 (${result.detail}) · 연속 $refreshFailStreak 회")
+        if (config.backOnRefreshFail) {
+            log("뒤로가기로 이전 화면 복귀 후 1차부터 재시작")
+            try {
+                scanner.pressBack()
+            } catch (e: Throwable) {
+                Log.w(TAG, "pressBack failed", e)
+            }
+            delay(1_200)
+        }
+        if (refreshFailStreak >= REFRESH_FAIL_WARN_AT) {
+            host.onWarn(
+                "페이지 새로고침이 ${refreshFailStreak}회 연속 확인되지 않았습니다. " +
+                    "대상 화면이 새로고침을 지원하지 않을 수 있습니다. 탐색은 계속됩니다."
+            )
+            refreshFailStreak = 0
+        }
         delay(wait)
     }
 
@@ -386,9 +432,13 @@ class SearchEngine(
     /** @return true 면 계속(재개), false 면 루프 종료 */
     private suspend fun onFound(
         scanner: ScreenScanner,
-        texts: List<String>,
+        hit: RowHit,
         cfg: SearchConfig
     ): Boolean {
+        // 줄 클릭으로 화면이 바뀌었을 수 있으므로 잠깐 기다렸다가 캡처·알림한다.
+        if (cfg.clickFoundRow && hit.clicked) delay(AFTER_ROW_CLICK_WAIT_MS)
+
+        val texts = hit.secondaryMatched + hit.tertiaryMatched
         val now = Date()
         val timeText = human.format(now)
         log("발견! ${texts.joinToString(", ")}")
@@ -408,8 +458,11 @@ class SearchEngine(
 
         try {
             withContext(Dispatchers.IO) {
-                File(appCtx.filesDir, "found_log.txt")
-                    .appendText(timeText + "\t" + texts.joinToString("|") + "\n")
+                File(appCtx.filesDir, "found_log.txt").appendText(
+                    timeText + "\t" + texts.joinToString("|") +
+                        "\t클릭=" + (if (hit.clicked) hit.clickMethod else "안함") +
+                        "\t" + hit.rowText + "\n"
+                )
             }
         } catch (e: Throwable) {
             Log.w(TAG, "log write failed", e)
@@ -419,12 +472,13 @@ class SearchEngine(
             it.copy(
                 phase = Phase.PAUSED_FOUND,
                 foundTexts = texts,
+                foundRowText = hit.rowText,
                 foundTimeText = timeText,
                 foundShotPath = shotPath,
                 foundCount = it.foundCount + 1
             )
         }
-        host.onFound(texts, timeText, shotPath)
+        host.onFound(texts, hit.rowText, timeText, shotPath)
 
         // 사용자가 [계속] 을 누를 때까지 대기
         val d = CompletableDeferred<Boolean>()
@@ -441,7 +495,12 @@ class SearchEngine(
 
         host.onFoundCleared()
         SearchBus.update {
-            it.copy(phase = Phase.IDLE, foundTexts = emptyList(), foundShotPath = null)
+            it.copy(
+                phase = Phase.IDLE,
+                foundTexts = emptyList(),
+                foundRowText = "",
+                foundShotPath = null
+            )
         }
         log("재개")
         status("재개")

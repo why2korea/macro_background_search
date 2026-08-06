@@ -243,7 +243,9 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         }
         runCatching {
             store.setRunning(true)
-            store.addHistory(HistoryItem(config.primaryText, config.secondaryTexts))
+            store.addHistory(
+                HistoryItem(config.primaryText, config.secondaryTexts, config.tertiaryTexts)
+            )
         }
         acquireWakeLock()
         engine.start(config, withCountdown)
@@ -334,9 +336,14 @@ class OverlayService : Service(), EngineHost, OverlayActions {
         notifier.notifyOngoing(message, running = SearchBus.snapshot.value.running)
     }
 
-    override fun onFound(texts: List<String>, timeText: String, shotPath: String?) {
+    override fun onFound(
+        texts: List<String>,
+        rowText: String,
+        timeText: String,
+        shotPath: String?
+    ) {
         val cfg = config
-        if (cfg.notifySystem) notifier.notifyFound(texts, timeText, cfg.notifySound)
+        if (cfg.notifySystem) notifier.notifyFound(texts, rowText, timeText, cfg.notifySound)
         if (cfg.notifyVibrate) notifier.vibrate()
         if (cfg.notifyBanner) overlay?.showBanner()
         notifier.notifyOngoing("발견됨 - 일시정지 (계속 누르면 재개)", running = true)

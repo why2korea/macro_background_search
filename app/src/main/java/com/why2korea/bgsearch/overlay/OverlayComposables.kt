@@ -169,6 +169,14 @@ fun FoundBanner(actions: OverlayActions) {
                 fontSize = 13.sp,
                 maxLines = 3
             )
+            if (s.foundRowText.isNotBlank()) {
+                Text(
+                    "[줄] " + s.foundRowText,
+                    color = Color(0xFFFFE0E0),
+                    fontSize = 11.sp,
+                    maxLines = 2
+                )
+            }
             Text(s.foundTimeText, color = Color(0xFFFFCDD2), fontSize = 11.sp)
             if (s.foundShotPath != null) {
                 Text("스크린샷 저장됨", color = Color(0xFFFFCDD2), fontSize = 11.sp)

@@ -30,7 +30,10 @@ class SettingsStore(private val context: Context) {
     private object Keys {
         val PRIMARY = stringPreferencesKey("primary_text")
         val SECONDARY = stringPreferencesKey("secondary_texts_json")
+        val TERTIARY = stringPreferencesKey("tertiary_texts_json")
         val MATCH_ALL = booleanPreferencesKey("match_all")
+        val CLICK_ROW = booleanPreferencesKey("click_found_row")
+        val BACK_ON_REFRESH_FAIL = booleanPreferencesKey("back_on_refresh_fail")
         val RATIO = floatPreferencesKey("scroll_ratio")
         val STEP_DELAY = longPreferencesKey("step_delay_ms")
         val START_DELAY = longPreferencesKey("start_delay_ms")
@@ -67,6 +70,9 @@ class SettingsStore(private val context: Context) {
             primaryText = p[Keys.PRIMARY] ?: d.primaryText,
             secondaryTexts = decodeStrings(p[Keys.SECONDARY] ?: ""),
             matchAll = p[Keys.MATCH_ALL] ?: d.matchAll,
+            tertiaryTexts = decodeStrings(p[Keys.TERTIARY] ?: ""),
+            clickFoundRow = p[Keys.CLICK_ROW] ?: d.clickFoundRow,
+            backOnRefreshFail = p[Keys.BACK_ON_REFRESH_FAIL] ?: d.backOnRefreshFail,
             scrollRatio = p[Keys.RATIO] ?: d.scrollRatio,
             stepDelayMs = p[Keys.STEP_DELAY] ?: d.stepDelayMs,
             startDelayMs = p[Keys.START_DELAY] ?: d.startDelayMs,
@@ -94,7 +100,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p ->
             p[Keys.PRIMARY] = c.primaryText
             p[Keys.SECONDARY] = encodeStrings(c.secondaryTexts)
+            p[Keys.TERTIARY] = encodeStrings(c.tertiaryTexts)
             p[Keys.MATCH_ALL] = c.matchAll
+            p[Keys.CLICK_ROW] = c.clickFoundRow
+            p[Keys.BACK_ON_REFRESH_FAIL] = c.backOnRefreshFail
             p[Keys.RATIO] = c.scrollRatio
             p[Keys.STEP_DELAY] = c.stepDelayMs
             p[Keys.START_DELAY] = c.startDelayMs
@@ -137,7 +146,8 @@ class SettingsStore(private val context: Context) {
             for (h in cur) {
                 if (next.size >= HISTORY_MAX) break
                 if (h.primaryText == item.primaryText &&
-                    h.secondaryTexts == item.secondaryTexts
+                    h.secondaryTexts == item.secondaryTexts &&
+                    h.tertiaryTexts == item.tertiaryTexts
                 ) continue
                 next.add(h)
             }
@@ -175,6 +185,7 @@ class SettingsStore(private val context: Context) {
                 JSONObject()
                     .put("p", h.primaryText)
                     .put("s", JSONArray(h.secondaryTexts))
+                    .put("t", JSONArray(h.tertiaryTexts))
             )
         }
         return arr.toString()
@@ -194,7 +205,14 @@ class SettingsStore(private val context: Context) {
                         if (s.isNotBlank()) sec.add(s)
                     }
                 }
-                out.add(HistoryItem(o.optString("p", ""), sec))
+                val ter = ArrayList<String>()
+                o.optJSONArray("t")?.let { ta ->
+                    for (j in 0 until ta.length()) {
+                        val s = ta.optString(j, "")
+                        if (s.isNotBlank()) ter.add(s)
+                    }
+                }
+                out.add(HistoryItem(o.optString("p", ""), sec, ter))
             }
             out
         } catch (e: Throwable) {

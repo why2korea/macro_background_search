@@ -36,6 +36,8 @@ data class SearchSnapshot(
     val targetPackage: String = "",
     val status: String = "대기 중",
     val foundTexts: List<String> = emptyList(),
+    /** 발견된 줄의 전체 텍스트 */
+    val foundRowText: String = "",
     val foundTimeText: String = "",
     val foundShotPath: String? = null,
     val foundCount: Int = 0,
