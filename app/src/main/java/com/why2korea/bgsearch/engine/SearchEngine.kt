@@ -367,13 +367,31 @@ class SearchEngine(
             // 클릭 후 목록을 뒤늦게 불러오는 페이지에서 짧으면 멀쩡한 클릭도 실패로 오판한다.
             onBeforeClick(info)
             val r = scanner.clickText(cfg.primaryText, cfg.preferGestureTap, cfg.afterClickWaitMs)
-            if (r.found && r.clicked) {
+            if (r.found && r.clicked && r.changed) {
                 primaryFailStreak = 0
-                log(
-                    "1차 클릭 [${r.method}] \"${r.snippet}\"" +
-                        if (r.changed) " · 화면 변화 있음" else " · 화면 변화 없음(결과가 비었을 수 있음)"
-                )
+                log("1차 클릭 성공 [${r.method}] \"${r.snippet}\" · 화면 전환 확인")
                 return true
+            }
+            if (r.found && r.clicked && !r.changed) {
+                /*
+                 * 클릭 동작은 나갔는데 화면이 그대로다 = 탭이 전환되지 않았다.
+                 *
+                 * 탭이 전환되면 목록이 바뀌거나(다른 지역) 비워지므로 화면은 반드시 변한다.
+                 * 변화가 없다는 건 여전히 이전 탭(예: 포항)이라는 뜻이고,
+                 * 이 상태로 2차 탐색을 하면 **엉뚱한 목록에서 발견 알림이 뜬다.**
+                 * (실기기에서 확인된 오작동 — 포항 목록으로 계속 "발견" 이 떴다)
+                 * 그래서 여기서는 절대 2차 탐색으로 넘기지 않는다.
+                 */
+                clickRetry++
+                log("1차 클릭했으나 화면이 그대로 - 탭 전환 안 됨 [${r.method}] · $clickRetry/$CLICK_RETRY_MAX")
+                if (clickRetry < CLICK_RETRY_MAX) {
+                    delay(cfg.stepDelayMs)
+                    continue
+                }
+                log("탭 전환이 확인되지 않아 2차 탐색을 건너뜁니다. 이번 라운드는 여기서 종료합니다.")
+                log("계속 이러면 설정에서 '1차 클릭에 좌표 탭 우선' 을 켜/꺼 보세요.")
+                clickRetry = 0
+                return false
             }
             if (r.found && !r.clicked) {
                 // 문자열은 찾았지만 클릭할 수단이 없다 (클릭 가능한 요소가 아님).

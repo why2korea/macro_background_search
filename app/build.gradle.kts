@@ -12,8 +12,8 @@ android {
         applicationId = "com.why2korea.bgsearch"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "2.5.1"
+        versionCode = 20
+        versionName = "2.6.2"
     }
 
     buildTypes {

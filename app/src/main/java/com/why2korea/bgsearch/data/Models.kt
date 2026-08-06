@@ -29,10 +29,10 @@ data class SearchConfig(
 
     /**
      * 1차 클릭 시 좌표 탭 제스처를 먼저 쓸지.
-     * ACTION_CLICK 이 성공을 반환하고도 실제로는 아무 일도 안 하는 웹페이지가 있다.
+     * ACTION_CLICK 은 성공을 반환하고도 실제로는 아무 일도 안 하는 웹페이지가 많아 기본을 좌표 탭으로 둔다.
      * 그런 화면에서는 이걸 켜면 사람이 손가락으로 누른 것과 같은 방식으로 동작한다.
      */
-    val preferGestureTap: Boolean = false,
+    val preferGestureTap: Boolean = true,
 
     /** 2차(+3차) 문자열을 최종 발견하면 재검색을 자동으로 정지할지 (기본 켬) */
     val stopWhenFound: Boolean = true,

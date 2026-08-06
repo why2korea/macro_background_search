@@ -112,6 +112,10 @@ class ScanService : AccessibilityService(), ScreenScanner {
     @Volatile
     private var pullCount = 0
 
+    /** 직전에 실제로 화면을 바꾼 클릭 수단. 다음 클릭에서 이걸 먼저 쓴다. */
+    @Volatile
+    private var lastWorkingMethod: String? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
@@ -376,10 +380,28 @@ class ScanService : AccessibilityService(), ScreenScanner {
                 Log.w(TAG, "ACTION_SHOW_ON_SCREEN failed", e)
             }
 
-            val methods = if (preferGesture) listOf("gesture-tap", "ACTION_CLICK")
+            /*
+             * 수단을 순서대로 시도하되, **화면이 실제로 바뀐 수단이 나올 때까지 계속 넘어간다.**
+             *
+             * 예전에 "동작만 전달되면 성공" 으로 바꿨더니, 웹페이지에서 ACTION_CLICK 이
+             * true 를 돌려주고도 아무 일도 안 하는 경우에 좌표 탭으로 넘어가지 않았다.
+             * 그 결과 탭이 안 바뀐 채(포항 그대로) 2차 탐색이 돌아 엉뚱한 목록에서
+             * "발견" 이 떴다. 실기기에서 확인된 실제 오작동이다.
+             *
+             * 그렇다고 "변화 없음 = 실패" 로 두면, 결과가 비어 화면이 안 바뀌는 정상 상황에서
+             * 무한 재시도에 빠진다. 그래서 모든 수단을 다 써 본 뒤에는
+             * clicked=true, changed=false 로 돌려주고 루프는 진행시킨다.
+             */
+            // 직전에 실제로 화면을 바꾼 수단이 있으면 그걸 먼저 쓴다.
+            // 이 사이트처럼 ACTION_CLICK 이 늘 헛도는 곳에서 매 라운드 헛치는 시도를 없앤다.
+            val prefer = lastWorkingMethod ?: if (preferGesture) "gesture-tap" else "ACTION_CLICK"
+            val methods = if (prefer == "gesture-tap") listOf("gesture-tap", "ACTION_CLICK")
             else listOf("ACTION_CLICK", "gesture-tap")
 
-            val window = verifyMs.coerceIn(1_000L, 15_000L)
+            // 탭 전환이 느린 페이지가 있어 확인 창이 짧으면 성공한 클릭도 실패로 보고
+            // 다음 수단을 또 쏘게 된다. 최소 4초는 기다린다.
+            val window = verifyMs.coerceIn(4_000L, 15_000L)
+            var firedAny: String? = null
             for (m in methods) {
                 val before = snapshotInfo()
                 val baseEv = subtreeEventCount
@@ -391,15 +413,24 @@ class ScanService : AccessibilityService(), ScreenScanner {
                     // 이 수단은 아예 못 썼다 (클릭 가능한 조상 없음 / 좌표 없음) → 다음 수단으로
                     continue
                 }
-                // 클릭 동작은 전달됐다. 화면 변화는 참고 정보로만 본다.
-                // 결과가 비어 화면이 안 바뀌는 페이지가 있어서, 변화 없음을 실패로 보면 안 된다.
-                val changed = awaitScreenChange(before, baseEv, window, CLICK_EVENT_THRESHOLD)
+                firedAny = m
+                if (awaitScreenChange(before, baseEv, window, CLICK_EVENT_THRESHOLD)) {
+                    lastWorkingMethod = m
+                    return@withContext ClickResult(
+                        found = true, clicked = true, method = m, snippet = snippet, changed = true
+                    )
+                }
+                Log.i(TAG, "click via $m fired but screen did not change - trying next method")
+            }
+
+            if (firedAny != null) {
                 return@withContext ClickResult(
                     found = true,
                     clicked = true,
-                    method = m,
+                    method = firedAny,
                     snippet = snippet,
-                    changed = changed
+                    changed = false,
+                    error = "모든 수단을 써도 화면이 바뀌지 않음"
                 )
             }
 
