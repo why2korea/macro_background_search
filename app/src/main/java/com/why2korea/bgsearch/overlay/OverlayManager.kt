@@ -16,9 +16,9 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ViewCompositionStrategy
 import com.why2korea.bgsearch.R
 import com.why2korea.bgsearch.util.Metrics
 import kotlin.math.abs
@@ -201,12 +201,8 @@ class OverlayManager(
 
     private fun showControlBar() {
         if (controlAdded) return
-        val v = controlView ?: ComposeView(themed).also { cv ->
-            owner.attachTo(cv)
-            cv.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnLifecycleDestroyed(owner))
-            cv.setContent { ControlBar(actions) }
-            controlView = cv
-        }
+        val v = newComposeView { ControlBar(actions) }
+        controlView = v
         val p = baseParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT
@@ -222,6 +218,7 @@ class OverlayManager(
         if (!controlAdded) return
         removeSafely(v)
         controlAdded = false
+        controlView = null
     }
 
     // ------------------------------------------------------------------ 버블
@@ -404,12 +401,8 @@ class OverlayManager(
 
     private fun showCloseZone() {
         if (closeAdded) return
-        val v = closeView ?: ComposeView(themed).also { cv ->
-            owner.attachTo(cv)
-            cv.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnLifecycleDestroyed(owner))
-            cv.setContent { CloseZone(closeActive.value) }
-            closeView = cv
-        }
+        val v = newComposeView { CloseZone(closeActive.value) }
+        closeView = v
         val p = baseParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT
@@ -427,18 +420,15 @@ class OverlayManager(
         if (!closeAdded) return
         removeSafely(v)
         closeAdded = false
+        closeView = null
     }
 
     // ------------------------------------------------------------------ 배너
 
     fun showBanner() {
         if (bannerAdded) return
-        val v = bannerView ?: ComposeView(themed).also { cv ->
-            owner.attachTo(cv)
-            cv.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnLifecycleDestroyed(owner))
-            cv.setContent { FoundBanner(actions) }
-            bannerView = cv
-        }
+        val v = newComposeView { FoundBanner(actions) }
+        bannerView = v
         val p = baseParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT
@@ -454,6 +444,26 @@ class OverlayManager(
         if (!bannerAdded) return
         removeSafely(v)
         bannerAdded = false
+        bannerView = null
+    }
+
+    // ------------------------------------------------------------------ ComposeView 생성
+
+    /**
+     * 오버레이 윈도우에 붙일 ComposeView 를 매번 새로 만든다.
+     *
+     * 같은 ComposeView 인스턴스를 removeView 후 다시 addView 하면
+     * 화면에는 그려지지만 포인터 입력이 라우팅되지 않아 버튼이 먹지 않는다.
+     * (실기기 확인: 첫 확장에서는 동작, 축소 후 재확장하면 모든 버튼 무반응)
+     * ComposeView 를 윈도우 사이에서 재사용하지 않는 것이 확실한 해법이라
+     * 표시할 때마다 새로 만들고 숨길 때 참조를 버린다.
+     */
+    private fun newComposeView(content: @Composable () -> Unit): ComposeView {
+        val cv = ComposeView(themed)
+        owner.attachTo(cv)
+        // 기본 전략(detach 시 컴포지션 폐기)을 그대로 쓴다. 뷰를 재사용하지 않으므로 유지할 이유가 없다.
+        cv.setContent(content)
+        return cv
     }
 
     // ------------------------------------------------------------------ 기타
