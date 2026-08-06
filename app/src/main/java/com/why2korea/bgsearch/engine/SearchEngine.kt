@@ -50,7 +50,7 @@ class SearchEngine(
 ) {
 
     companion object {
-        const val MIN_REFRESH_MS = 3_000L
+        const val MIN_REFRESH_MS = 1_000L
         const val MAX_STEPS_PER_PHASE = 400
         /** 같은 자리에서 클릭을 다시 시도하는 최대 횟수 */
         const val CLICK_RETRY_MAX = 3
@@ -225,17 +225,28 @@ class SearchEngine(
                 // 우리 앱(설정 화면)이 앞에 있으면 읽을 것도 없고, 조작하면 우리 UI 를 건드린다.
                 if (!awaitTargetScreen(scanner)) continue
 
-                // ---------------- 1. 1차 문자열 탐색 + 클릭
+                // ---------------- 1. 새로고침 먼저 (첫 라운드 포함)
+                // 라운드는 항상 "깨끗한 초기 화면" 에서 시작해야 1차 클릭이 제대로 먹는다.
+                // 첫 라운드부터 새로고침하므로 새로고침 동작 자체도 시작하자마자 검증된다.
+                doRefresh(scanner, "라운드 $round 시작")
+
+                // ---------------- 2. 새로고침 후 화면 로딩 대기 (설정값, 기본 5초)
+                val load = cfg.refreshWaitMs.coerceAtLeast(0L)
+                if (load > 0) {
+                    status("새로고침 후 로딩 대기 ${load / 1000.0}초")
+                    delay(load)
+                }
+
+                // ---------------- 3. 1차 문자열 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.FIND_PRIMARY) }
                 // 클릭 직전 화면 상태. 클릭 결과가 채워졌는지 비교하는 기준이 된다.
                 var preClick: ScreenSnapshotInfo? = null
                 if (!findAndClickPrimary(scanner, round, cfg) { preClick = it }) {
-                    // 아직 아무 화면에도 들어가지 않았으므로 뒤로가기를 하면 대상 페이지를 벗어난다.
-                    refreshAndRestart(scanner, "1차 문자열 미발견")
+                    restBeforeNextRound("1차 문자열 미발견")
                     continue
                 }
 
-                // ---------------- 2. 클릭 후 목록이 채워질 때까지 대기
+                // ---------------- 4. 클릭 후 목록이 채워질 때까지 대기
                 SearchBus.update { it.copy(phase = Phase.AFTER_CLICK) }
                 val afterClick = cfg.afterClickWaitMs.coerceAtLeast(0L)
                 status("클릭 후 대기 ${afterClick / 1000.0}초")
@@ -245,24 +256,32 @@ class SearchEngine(
                 // 아직 빈 화면을 스캔해 "미발견 + 바닥 도달" 로 잘못 판정한다.
                 val base = preClick
                 if (base != null && cfg.contentWaitMs > 0) {
-                    status("클릭 결과 로딩 대기 (최대 ${cfg.contentWaitMs / 1000}초)")
-                    val grew = scanner.awaitContentGrow(base, cfg.contentWaitMs)
-                    log(if (grew) "클릭 결과 로딩 확인" else "클릭 결과가 시간 내에 채워지지 않음 - 그대로 스캔")
+                    // 이미 목록이 떠 있으면 기다릴 필요가 없다.
+                    // (새로고침 뒤에도 선택이 유지돼 클릭 전부터 내용이 있는 경우가 있다)
+                    val already = scanner.findRowAndClick(
+                        cfg.secondaries(), cfg.matchAll, cfg.tertiaries(), false
+                    ) != null
+                    if (already) {
+                        log("클릭 결과가 이미 화면에 있음 - 대기 생략")
+                    } else {
+                        status("클릭 결과 로딩 대기 (최대 ${cfg.contentWaitMs / 1000}초)")
+                        val grew = scanner.awaitContentGrow(base, cfg.contentWaitMs)
+                        log(if (grew) "클릭 결과 로딩 확인" else "클릭 결과가 시간 내에 채워지지 않음 - 그대로 스캔")
+                    }
                 }
 
-                // ---------------- 3. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
+                // ---------------- 5. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.SCAN_SECONDARY) }
                 val hit = scanRowWhileScrolling(scanner, round, cfg)
 
                 if (hit != null) {
-                    // ---------------- 4. 발견 → 알림 후 일시정지
+                    // ---------------- 6. 발견 → 알림 후 정지(또는 일시정지)
                     if (!onFound(scanner, hit, cfg)) return
                     continue
                 }
 
-                // ---------------- 5. 미발견 → 페이지 새로고침 → 1차부터 재시작
-                // 1차를 클릭해 들어온 상태이므로, 새로고침이 안 되면 뒤로가기로 복귀해도 된다.
-                refreshAndRestart(scanner, "2차 문자열 미발견")
+                // ---------------- 7. 미발견 → 쉬었다가 다음 라운드 (다음 라운드가 새로고침으로 시작)
+                restBeforeNextRound("2차 문자열 미발견")
             }
         } catch (e: CancellationException) {
             throw e
@@ -464,17 +483,18 @@ class SearchEngine(
      * 복귀하는 폴백이 있었는데, 브라우저에서 이걸 하면 대상 페이지 자체를 벗어나 버린다.
      * "못 찾으면 새로고침만" 이 요구사항이므로 실패해도 새로고침만 재시도한다.
      */
-    private suspend fun refreshAndRestart(scanner: ScreenScanner, reason: String) {
+    /** 라운드 사이 휴식. 연속 요청으로 서버를 두드리지 않기 위한 간격이다. */
+    private suspend fun restBeforeNextRound(reason: String) {
+        val pre = config.preRefreshWaitMs.coerceAtLeast(0L)
+        if (pre <= 0) return
+        log("$reason - ${pre / 1000.0}초 쉬었다가 다음 라운드")
+        status("$reason · ${pre / 1000}초 대기")
+        delay(pre)
+    }
+
+    private suspend fun doRefresh(scanner: ScreenScanner, reason: String) {
         SearchBus.update { it.copy(phase = Phase.REFRESHING) }
         val wait = config.refreshWaitMs.coerceAtLeast(MIN_REFRESH_MS)
-
-        // 새로고침 전 휴식. 연속 요청으로 서버를 두드리지 않기 위한 간격이기도 하다.
-        val pre = config.preRefreshWaitMs.coerceAtLeast(0L)
-        if (pre > 0) {
-            log("$reason - ${pre / 1000.0}초 쉬었다가 새로고침")
-            status("$reason · ${pre / 1000}초 대기 후 새로고침")
-            delay(pre)
-        }
         status("$reason - 새로고침 중")
 
         var result = try {

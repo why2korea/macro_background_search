@@ -399,11 +399,11 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                     fontSize = 11.sp,
                     color = Color(0xFF757575)
                 )
-                NumberField("새로고침 후 대기 (ms, 최소 3000)", cfg.refreshWaitMs.toString()) {
+                NumberField("새로고침 후 로딩 대기 (ms)", cfg.refreshWaitMs.toString()) {
                     vm.setRefreshWait(it.toLongOrNull() ?: cfg.refreshWaitMs)
                 }
                 Text(
-                    "새로고침 직후 페이지가 안정되기를 기다리는 시간입니다. 기본 3000ms.",
+                    "새로고침 직후 화면이 다 뜨기를 기다리는 시간입니다. 이 시간이 지난 뒤 1차 문자열을 찾습니다. 기본 5000ms.",
                     fontSize = 11.sp,
                     color = Color(0xFF757575)
                 )

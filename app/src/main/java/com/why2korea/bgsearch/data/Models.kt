@@ -51,7 +51,7 @@ data class SearchConfig(
     val preRefreshWaitMs: Long = 5_000L,
 
     /** 새로고침 **후** 페이지가 안정되기를 기다리는 시간 (ms) */
-    val refreshWaitMs: Long = 3_000L,
+    val refreshWaitMs: Long = 5_000L,
 
     /**
      * 라운드 시작 시 1차 문자열이 화면에 나타나기를 기다리는 **최대** 시간 (ms).

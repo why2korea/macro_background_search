@@ -316,10 +316,20 @@ class ScanService : AccessibilityService(), ScreenScanner {
             true
         }
 
+        /*
+         * 우선순위
+         *  1) 화면에 보이는 노드          — 안 보이는 노드를 클릭하면 아무 일도 안 일어난다
+         *  2) 클릭 가능한 조상이 있는 노드 — 실제로 누를 수 있는 것
+         *  3) 자기 텍스트가 짧은 노드      — 주소창처럼 긴 텍스트에 우연히 포함된 것 제외
+         *
+         * 3번만 쓰면, 화면에 없는 짧은 후보("평택")가 실제 버튼("평택(만포대)")을 밀어내
+         * 클릭이 헛나간다. 실기기에서 이 증상이 나왔다.
+         */
         return candidates.minByOrNull { n ->
-            val len = TextNorm.of(nodeText(n)).length
-            // 보이는 노드에 큰 가산점 (짧더라도 안 보이는 노드보다 우선)
-            if (visible(n)) len else len + 100_000
+            var score = TextNorm.of(nodeText(n)).length
+            if (clickableAncestor(n) == null) score += 10_000
+            if (!visible(n)) score += 1_000_000
+            score
         }
     }
 
