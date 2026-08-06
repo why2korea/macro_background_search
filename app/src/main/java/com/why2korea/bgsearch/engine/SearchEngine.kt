@@ -56,6 +56,8 @@ class SearchEngine(
         const val CLICK_RETRY_MAX = 3
         const val PRIMARY_FAIL_WARN_AT = 5
         const val REFRESH_FAIL_WARN_AT = 5
+        /** 새로고침 시도 횟수 (뒤로가기 폴백 없이 이 횟수만큼 재시도) */
+        const val REFRESH_ATTEMPTS = 3
         /** 줄 클릭 후 화면이 바뀔 시간을 준 뒤 캡처한다 */
         const val AFTER_ROW_CLICK_WAIT_MS = 1_200L
         const val BOTTOM_STABLE_COUNT = 3
@@ -225,17 +227,28 @@ class SearchEngine(
 
                 // ---------------- 1. 1차 문자열 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.FIND_PRIMARY) }
-                if (!findAndClickPrimary(scanner, round, cfg)) {
+                // 클릭 직전 화면 상태. 클릭 결과가 채워졌는지 비교하는 기준이 된다.
+                var preClick: ScreenSnapshotInfo? = null
+                if (!findAndClickPrimary(scanner, round, cfg) { preClick = it }) {
                     // 아직 아무 화면에도 들어가지 않았으므로 뒤로가기를 하면 대상 페이지를 벗어난다.
-                    refreshAndRestart(scanner, "1차 문자열 미발견", allowBack = false)
+                    refreshAndRestart(scanner, "1차 문자열 미발견")
                     continue
                 }
 
-                // ---------------- 2. 클릭 후 화면 전환 대기 (설정값)
+                // ---------------- 2. 클릭 후 목록이 채워질 때까지 대기
                 SearchBus.update { it.copy(phase = Phase.AFTER_CLICK) }
                 val afterClick = cfg.afterClickWaitMs.coerceAtLeast(0L)
                 status("클릭 후 대기 ${afterClick / 1000.0}초")
                 delay(afterClick)
+
+                // 결과가 AJAX 로 뒤늦게 오는 페이지가 있다. 고정 대기만으로 넘어가면
+                // 아직 빈 화면을 스캔해 "미발견 + 바닥 도달" 로 잘못 판정한다.
+                val base = preClick
+                if (base != null && cfg.contentWaitMs > 0) {
+                    status("클릭 결과 로딩 대기 (최대 ${cfg.contentWaitMs / 1000}초)")
+                    val grew = scanner.awaitContentGrow(base, cfg.contentWaitMs)
+                    log(if (grew) "클릭 결과 로딩 확인" else "클릭 결과가 시간 내에 채워지지 않음 - 그대로 스캔")
+                }
 
                 // ---------------- 3. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.SCAN_SECONDARY) }
@@ -249,7 +262,7 @@ class SearchEngine(
 
                 // ---------------- 5. 미발견 → 페이지 새로고침 → 1차부터 재시작
                 // 1차를 클릭해 들어온 상태이므로, 새로고침이 안 되면 뒤로가기로 복귀해도 된다.
-                refreshAndRestart(scanner, "2차 문자열 미발견", allowBack = true)
+                refreshAndRestart(scanner, "2차 문자열 미발견")
             }
         } catch (e: CancellationException) {
             throw e
@@ -302,32 +315,56 @@ class SearchEngine(
     private suspend fun findAndClickPrimary(
         scanner: ScreenScanner,
         round: Int,
-        cfg: SearchConfig
+        cfg: SearchConfig,
+        /** 클릭 직전 화면 상태를 호출자에게 넘겨준다 (클릭 결과 로딩 판정용) */
+        onBeforeClick: (ScreenSnapshotInfo) -> Unit
     ): Boolean {
         var step = 0
         var stable = 0
         var lastHash = Int.MIN_VALUE
         var clickRetry = 0
 
+        // 목록을 나중에 불러오는 페이지는 새로고침 직후 내용이 비어 있다.
+        // 고정 대기로 맞추기 어려우므로 1차 문자열이 실제로 보일 때까지 기다린다. (보이면 즉시 진행)
+        val waitMax = cfg.contentWaitMs.coerceAtLeast(0L)
+        if (waitMax > 0) {
+            status("라운드 $round · 1차 문자열 등장 대기 (최대 ${waitMax / 1000}초)")
+            val appeared = scanner.awaitTextAppear(cfg.primaryText, waitMax)
+            log(
+                if (appeared) "1차 문자열 등장 확인"
+                else "1차 문자열이 ${waitMax / 1000}초 안에 안 나타남 - 스크롤하며 탐색"
+            )
+        }
+
         while (scope.isActive && step < MAX_STEPS_PER_PHASE) {
             val info = scanner.snapshotInfo()
             SearchBus.update { it.copy(step = step, targetPackage = info.packageName) }
             status("라운드 $round · 1차 문자열 탐색 (스크롤 $step)")
 
-            val r = scanner.clickText(cfg.primaryText, cfg.preferGestureTap)
+            // 클릭 반영 확인 시간은 "클릭 후 대기" 설정을 그대로 쓴다.
+            // 클릭 후 목록을 뒤늦게 불러오는 페이지에서 짧으면 멀쩡한 클릭도 실패로 오판한다.
+            onBeforeClick(info)
+            val r = scanner.clickText(cfg.primaryText, cfg.preferGestureTap, cfg.afterClickWaitMs)
             if (r.found && r.clicked) {
                 primaryFailStreak = 0
-                log("1차 클릭 성공 [${r.method}] \"${r.snippet}\" - 화면 변화 확인됨")
+                log(
+                    "1차 클릭 [${r.method}] \"${r.snippet}\"" +
+                        if (r.changed) " · 화면 변화 있음" else " · 화면 변화 없음(결과가 비었을 수 있음)"
+                )
                 return true
             }
             if (r.found && !r.clicked) {
-                // 찾기는 했는데 클릭이 화면에 반영되지 않았다. 스크롤하지 말고 같은 자리에서 재시도한다.
-                log("1차 문자열 \"${r.snippet}\" 클릭이 화면에 반영되지 않음 (${r.error ?: "?"}) - 재시도")
-                delay(cfg.stepDelayMs)
+                // 문자열은 찾았지만 클릭할 수단이 없다 (클릭 가능한 요소가 아님).
                 clickRetry++
-                if (clickRetry < CLICK_RETRY_MAX) continue
-                log("클릭 재시도 ${CLICK_RETRY_MAX}회 실패 - 설정에서 '좌표 탭 우선'을 켜보세요")
+                log("1차 문자열 \"${r.snippet}\" 을 클릭할 수 없음 (${r.error ?: "?"}) · $clickRetry/$CLICK_RETRY_MAX")
+                if (clickRetry < CLICK_RETRY_MAX) {
+                    delay(cfg.stepDelayMs)
+                    continue
+                }
+                log("클릭 가능한 요소를 못 찾아 그대로 2차 탐색으로 진행합니다.")
                 clickRetry = 0
+                primaryFailStreak = 0
+                return true
             }
 
             val moved = scanner.scrollDown(cfg.scrollRatio)
@@ -423,17 +460,21 @@ class SearchEngine(
      * 제스처를 보낸 것만으로 성공으로 치지 않는다. ScanService 가 화면이 실제로 다시
      * 그려졌는지 확인하고, 방법을 바꿔가며 재시도한다.
      *
-     * @param allowBack 새로고침이 끝내 확인되지 않았을 때 뒤로가기로 복귀해도 되는지.
-     *   2차 미발견이면 1차를 클릭해 들어온 상태라 뒤로가기가 곧 목록 복귀 = 재조회다.
-     *   1차 미발견이면 아직 아무 데도 안 들어갔으므로 뒤로가기를 하면 대상 페이지를 벗어난다.
+     * **뒤로가기는 절대 하지 않는다.** 예전에는 새로고침이 확인되지 않으면 뒤로가기로
+     * 복귀하는 폴백이 있었는데, 브라우저에서 이걸 하면 대상 페이지 자체를 벗어나 버린다.
+     * "못 찾으면 새로고침만" 이 요구사항이므로 실패해도 새로고침만 재시도한다.
      */
-    private suspend fun refreshAndRestart(
-        scanner: ScreenScanner,
-        reason: String,
-        allowBack: Boolean
-    ) {
+    private suspend fun refreshAndRestart(scanner: ScreenScanner, reason: String) {
         SearchBus.update { it.copy(phase = Phase.REFRESHING) }
         val wait = config.refreshWaitMs.coerceAtLeast(MIN_REFRESH_MS)
+
+        // 새로고침 전 휴식. 연속 요청으로 서버를 두드리지 않기 위한 간격이기도 하다.
+        val pre = config.preRefreshWaitMs.coerceAtLeast(0L)
+        if (pre > 0) {
+            log("$reason - ${pre / 1000.0}초 쉬었다가 새로고침")
+            status("$reason · ${pre / 1000}초 대기 후 새로고침")
+            delay(pre)
+        }
         status("$reason - 새로고침 중")
 
         var result = try {
@@ -443,10 +484,12 @@ class SearchEngine(
             RefreshResult(false, "none", e.message ?: "error")
         }
 
-        // 1회 재시도: 첫 시도가 타이밍 문제로 실패하는 경우가 있다.
-        if (!result.ok && scope.isActive) {
-            log("새로고침 미확인 - 한 번 더 시도")
-            delay(800)
+        // 타이밍 문제로 첫 시도가 실패하는 경우가 있어 몇 번 더 시도한다. (뒤로가기는 쓰지 않는다)
+        var attempt = 1
+        while (!result.ok && scope.isActive && attempt < REFRESH_ATTEMPTS) {
+            attempt++
+            log("새로고침 미확인 - ${attempt}번째 시도")
+            delay(1_000)
             result = try {
                 scanner.refreshPage(wait)
             } catch (e: Throwable) {
@@ -460,20 +503,9 @@ class SearchEngine(
             return
         }
 
-        // 새로고침이 끝내 확인되지 않았다 → 뒤로가기로 복귀해 1차부터 다시 탄다
+        // 끝내 확인되지 않아도 페이지를 벗어나지 않는다. 다음 라운드에서 다시 시도한다.
         refreshFailStreak++
-        log("새로고침 확인 실패 (${result.detail}) · 연속 $refreshFailStreak 회")
-        if (allowBack && config.backOnRefreshFail) {
-            log("뒤로가기로 이전 화면 복귀 후 1차부터 재시작")
-            try {
-                scanner.pressBack()
-            } catch (e: Throwable) {
-                Log.w(TAG, "pressBack failed", e)
-            }
-            delay(1_200)
-        } else if (!allowBack) {
-            log("1차 미발견 상태라 뒤로가기는 하지 않음 (대상 화면 이탈 방지)")
-        }
+        log("새로고침 확인 실패 (${result.detail}) · 연속 $refreshFailStreak 회 - 페이지는 그대로 두고 다음 라운드")
         if (refreshFailStreak >= REFRESH_FAIL_WARN_AT) {
             host.onWarn(
                 "페이지 새로고침이 ${refreshFailStreak}회 연속 확인되지 않았습니다. " +

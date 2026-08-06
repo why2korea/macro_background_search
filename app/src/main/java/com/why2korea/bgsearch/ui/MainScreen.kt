@@ -390,9 +390,33 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                 NumberField("시작 카운트다운 (ms)", cfg.startDelayMs.toString()) {
                     vm.setStartDelay(it.toLongOrNull() ?: cfg.startDelayMs)
                 }
+                NumberField(
+                    "못 찾았을 때 새로고침 전 대기 (ms)",
+                    cfg.preRefreshWaitMs.toString()
+                ) { vm.setPreRefreshWait(it.toLongOrNull() ?: cfg.preRefreshWaitMs) }
+                Text(
+                    "문자열을 못 찾은 뒤 새로고침을 시작하기까지 쉬는 시간입니다. 기본 5000ms.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
+                )
                 NumberField("새로고침 후 대기 (ms, 최소 3000)", cfg.refreshWaitMs.toString()) {
                     vm.setRefreshWait(it.toLongOrNull() ?: cfg.refreshWaitMs)
                 }
+                Text(
+                    "새로고침 직후 페이지가 안정되기를 기다리는 시간입니다. 기본 3000ms.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
+                )
+                NumberField(
+                    "1차 문자열 등장 대기 (최대 ms)",
+                    cfg.contentWaitMs.toString()
+                ) { vm.setContentWait(it.toLongOrNull() ?: cfg.contentWaitMs) }
+                Text(
+                    "목록을 나중에 불러오는 페이지 대응. 1차 문자열이 보이면 즉시 진행하고, " +
+                        "이 시간까지 안 보이면 스크롤하며 찾습니다. 기본 15000ms.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
+                )
                 NumberField("최대 라운드 (0 = 무제한)", cfg.maxRounds.toString()) {
                     vm.setMaxRounds(it.toIntOrNull() ?: cfg.maxRounds)
                 }
@@ -402,14 +426,8 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                     checked = cfg.bubbleTapToggles,
                     onChange = vm::setBubbleTapToggles
                 )
-                SwitchRow(
-                    label = "새로고침 실패 시 뒤로가기로 복귀",
-                    checked = cfg.backOnRefreshFail,
-                    onChange = vm::setBackOnRefreshFail
-                )
                 Text(
-                    "새로고침 버튼·당겨서 새로고침이 모두 확인되지 않으면 뒤로가기로 이전 화면에 " +
-                        "돌아가 1차 문자열 클릭부터 다시 탑니다.",
+                    "못 찾으면 새로고침만 합니다. 뒤로가기로 이전 페이지로 넘어가는 동작은 하지 않습니다.",
                     fontSize = 11.sp,
                     color = Color(0xFF757575)
                 )

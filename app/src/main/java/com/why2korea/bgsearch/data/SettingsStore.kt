@@ -36,12 +36,13 @@ class SettingsStore(private val context: Context) {
         val AFTER_CLICK_WAIT = longPreferencesKey("after_click_wait_ms")
         val PREFER_GESTURE = booleanPreferencesKey("prefer_gesture_tap")
         val STOP_WHEN_FOUND = booleanPreferencesKey("stop_when_found")
-        val BACK_ON_REFRESH_FAIL = booleanPreferencesKey("back_on_refresh_fail")
         val RATIO = floatPreferencesKey("scroll_ratio")
         val STEP_DELAY = longPreferencesKey("step_delay_ms")
         val START_DELAY = longPreferencesKey("start_delay_ms")
         val BUBBLE_TAP = booleanPreferencesKey("bubble_tap_toggles")
+        val PRE_REFRESH_WAIT = longPreferencesKey("pre_refresh_wait_ms")
         val REFRESH_WAIT = longPreferencesKey("refresh_wait_ms")
+        val CONTENT_WAIT = longPreferencesKey("content_wait_ms")
         val MAX_ROUNDS = intPreferencesKey("max_rounds")
 
         val N_SYSTEM = booleanPreferencesKey("notify_system")
@@ -78,12 +79,13 @@ class SettingsStore(private val context: Context) {
             afterClickWaitMs = p[Keys.AFTER_CLICK_WAIT] ?: d.afterClickWaitMs,
             preferGestureTap = p[Keys.PREFER_GESTURE] ?: d.preferGestureTap,
             stopWhenFound = p[Keys.STOP_WHEN_FOUND] ?: d.stopWhenFound,
-            backOnRefreshFail = p[Keys.BACK_ON_REFRESH_FAIL] ?: d.backOnRefreshFail,
             scrollRatio = p[Keys.RATIO] ?: d.scrollRatio,
             stepDelayMs = p[Keys.STEP_DELAY] ?: d.stepDelayMs,
             startDelayMs = p[Keys.START_DELAY] ?: d.startDelayMs,
             bubbleTapToggles = p[Keys.BUBBLE_TAP] ?: d.bubbleTapToggles,
+            preRefreshWaitMs = p[Keys.PRE_REFRESH_WAIT] ?: d.preRefreshWaitMs,
             refreshWaitMs = p[Keys.REFRESH_WAIT] ?: d.refreshWaitMs,
+            contentWaitMs = p[Keys.CONTENT_WAIT] ?: d.contentWaitMs,
             maxRounds = p[Keys.MAX_ROUNDS] ?: d.maxRounds,
             notifySystem = p[Keys.N_SYSTEM] ?: d.notifySystem,
             notifyVibrate = p[Keys.N_VIBRATE] ?: d.notifyVibrate,
@@ -112,12 +114,13 @@ class SettingsStore(private val context: Context) {
             p[Keys.AFTER_CLICK_WAIT] = c.afterClickWaitMs
             p[Keys.PREFER_GESTURE] = c.preferGestureTap
             p[Keys.STOP_WHEN_FOUND] = c.stopWhenFound
-            p[Keys.BACK_ON_REFRESH_FAIL] = c.backOnRefreshFail
             p[Keys.RATIO] = c.scrollRatio
             p[Keys.STEP_DELAY] = c.stepDelayMs
             p[Keys.START_DELAY] = c.startDelayMs
             p[Keys.BUBBLE_TAP] = c.bubbleTapToggles
+            p[Keys.PRE_REFRESH_WAIT] = c.preRefreshWaitMs
             p[Keys.REFRESH_WAIT] = c.refreshWaitMs
+            p[Keys.CONTENT_WAIT] = c.contentWaitMs
             p[Keys.MAX_ROUNDS] = c.maxRounds
             p[Keys.N_SYSTEM] = c.notifySystem
             p[Keys.N_VIBRATE] = c.notifyVibrate

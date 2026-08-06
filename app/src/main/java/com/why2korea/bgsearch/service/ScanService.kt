@@ -73,9 +73,33 @@ class ScanService : AccessibilityService(), ScreenScanner {
         /** 클릭 판정용 서브트리 교체 이벤트 임계치 (새로고침보다 느슨하게) */
         private const val CLICK_EVENT_THRESHOLD = 1
 
+        /** 내용이 채워진 뒤 안정될 때까지 더 기다리는 최대 시간 */
+        private const val CONTENT_SETTLE_MAX_MS = 4_000L
+
         /** 새로고침 컨트롤로 인정할 텍스트 (정규화 후 부분 일치) */
         private val REFRESH_LABELS = listOf(
             "새로고침", "새로 고침", "refresh", "reload", "다시 시도", "다시시도", "재시도"
+        )
+
+        /** 브라우저 오버플로(더보기) 메뉴 버튼으로 인정할 텍스트 */
+        private val MENU_LABELS = listOf(
+            "맞춤설정 및 제어", "더보기", "옵션 더보기", "메뉴",
+            "customize and control", "more options", "menu"
+        )
+
+        /**
+         * 오버플로 메뉴로 새로고침을 시도할 브라우저 패키지.
+         * 브라우저가 아닌 앱에서 "더보기" 를 눌렀다가 엉뚱한 동작을 하면 안 되므로 화이트리스트로 제한한다.
+         */
+        private val BROWSER_PACKAGES = listOf(
+            "com.android.chrome",
+            "com.google.android.apps.chrome",
+            "com.sec.android.app.sbrowser",
+            "org.mozilla.firefox",
+            "com.naver.whale",
+            "com.microsoft.emmx",
+            "com.opera.browser",
+            "com.brave.browser"
         )
 
         /** 접근성 서비스가 설정에서 켜져 있는지 확인. */
@@ -331,7 +355,11 @@ class ScanService : AccessibilityService(), ScreenScanner {
      */
     private fun hasTarget(): Boolean = rootNodes().isNotEmpty()
 
-    override suspend fun clickText(text: String, preferGesture: Boolean): ClickResult =
+    override suspend fun clickText(
+        text: String,
+        preferGesture: Boolean,
+        verifyMs: Long
+    ): ClickResult =
         withContext(Dispatchers.Main) {
             if (!hasTarget()) return@withContext ClickResult(false, false, "no-target")
             val needle = TextNorm.of(text)
@@ -356,7 +384,7 @@ class ScanService : AccessibilityService(), ScreenScanner {
             val methods = if (preferGesture) listOf("gesture-tap", "ACTION_CLICK")
             else listOf("ACTION_CLICK", "gesture-tap")
 
-            var attempted = false
+            val window = verifyMs.coerceIn(1_000L, 15_000L)
             for (m in methods) {
                 val before = snapshotInfo()
                 val baseEv = subtreeEventCount
@@ -364,13 +392,20 @@ class ScanService : AccessibilityService(), ScreenScanner {
                     "ACTION_CLICK" -> performNodeClick(node)
                     else -> performGestureTap(node)
                 }
-                if (!fired) continue
-                attempted = true
-                // 클릭이 실제로 먹었는지 화면 변화로 확인한다.
-                if (awaitScreenChange(before, baseEv, CLICK_VERIFY_MS, CLICK_EVENT_THRESHOLD)) {
-                    return@withContext ClickResult(true, true, m, snippet)
+                if (!fired) {
+                    // 이 수단은 아예 못 썼다 (클릭 가능한 조상 없음 / 좌표 없음) → 다음 수단으로
+                    continue
                 }
-                Log.i(TAG, "click via $m produced no screen change - trying next")
+                // 클릭 동작은 전달됐다. 화면 변화는 참고 정보로만 본다.
+                // 결과가 비어 화면이 안 바뀌는 페이지가 있어서, 변화 없음을 실패로 보면 안 된다.
+                val changed = awaitScreenChange(before, baseEv, window, CLICK_EVENT_THRESHOLD)
+                return@withContext ClickResult(
+                    found = true,
+                    clicked = true,
+                    method = m,
+                    snippet = snippet,
+                    changed = changed
+                )
             }
 
             ClickResult(
@@ -378,7 +413,7 @@ class ScanService : AccessibilityService(), ScreenScanner {
                 clicked = false,
                 method = "none",
                 snippet = snippet,
-                error = if (attempted) "화면 변화 없음" else "클릭 수단 없음"
+                error = "클릭 수단 없음 (클릭 가능한 요소가 아님)"
             )
         }
 
@@ -407,6 +442,58 @@ class ScanService : AccessibilityService(), ScreenScanner {
         val cy = r.exactCenterY()
         if (cx < 0 || cy < 0 || cx > screenWidth() || cy > screenHeight()) return false
         return tap(cx, cy)
+    }
+
+    override suspend fun awaitTextAppear(text: String, timeoutMs: Long): Boolean =
+        withContext(Dispatchers.Main) {
+            val needle = TextNorm.of(text)
+            if (needle.isEmpty()) return@withContext false
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (hasTarget()) {
+                    val joined = readScreenTexts().joinToString(" ")
+                    if (joined.contains(needle)) return@withContext true
+                }
+                delay(600)
+            }
+            false
+        }
+
+    override suspend fun awaitContentGrow(
+        before: ScreenSnapshotInfo,
+        timeoutMs: Long
+    ): Boolean = withContext(Dispatchers.Main) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var grew = false
+
+        // 1단계 — 내용이 바뀌거나 늘어날 때까지 기다린다.
+        while (System.currentTimeMillis() < deadline) {
+            delay(500)
+            if (!hasTarget()) continue
+            val now = snapshotInfo()
+            if (now.contentHash != before.contentHash || now.nodeCount > before.nodeCount + 2) {
+                grew = true
+                break
+            }
+        }
+        if (!grew) return@withContext false
+
+        // 2단계 — 계속 채워지는 중일 수 있으므로 노드 수가 안정될 때까지 조금 더 기다린다.
+        var last = -1
+        var stable = 0
+        val settleDeadline = System.currentTimeMillis() + CONTENT_SETTLE_MAX_MS
+        while (System.currentTimeMillis() < settleDeadline) {
+            delay(500)
+            val c = snapshotInfo().nodeCount
+            if (c == last) {
+                stable++
+                if (stable >= 2) break
+            } else {
+                stable = 0
+            }
+            last = c
+        }
+        true
     }
 
     // ------------------------------------------------------------------ 줄(row) 매칭
@@ -661,8 +748,8 @@ class ScanService : AccessibilityService(), ScreenScanner {
         scrollToTop(30)
         delay(300)
 
-        // 1) 명시적 새로고침 컨트롤
-        val control = findRefreshControl()
+        // 1) 화면에 이미 보이는 명시적 새로고침 컨트롤
+        val control = findNodeByLabels(REFRESH_LABELS)
         if (control != null) {
             val before = snapshotInfo()
             val base = subtreeEventCount
@@ -674,7 +761,15 @@ class ScanService : AccessibilityService(), ScreenScanner {
             Log.i(TAG, "refresh control clicked but no reload detected")
         }
 
-        // 2) 당겨서 새로고침 (느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다)
+        // 2) 브라우저라면 오버플로 메뉴의 [새로고침] 을 직접 누른다.
+        //    당겨서 새로고침은 페이지가 아니라 내부 스크롤 영역에 먹혀서 실패하는 경우가 많다.
+        //    메뉴 새로고침은 URL 을 다시 로드하므로 페이지가 초기 상태로 돌아온다.
+        if (currentPackage() in BROWSER_PACKAGES) {
+            val r = refreshViaBrowserMenu(waitMs)
+            if (r != null) return@withContext r
+        }
+
+        // 3) 당겨서 새로고침 (느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다)
         val before = snapshotInfo()
         val base = subtreeEventCount
         val h = screenHeight()
@@ -732,14 +827,69 @@ class ScanService : AccessibilityService(), ScreenScanner {
         return false
     }
 
-    /** 화면에서 새로고침 버튼처럼 보이는 노드를 찾는다. */
-    private fun findRefreshControl(): AccessibilityNodeInfo? {
+    private fun currentPackage(): String =
+        try {
+            rootNodes().firstOrNull()?.packageName?.toString() ?: ""
+        } catch (e: Throwable) {
+            ""
+        }
+
+    /**
+     * 브라우저 오버플로(더보기) 메뉴를 열어 [새로고침] 을 누른다.
+     *
+     * 당겨서 새로고침은 페이지가 아니라 내부 스크롤 영역이 먹어버리면 아무 일도 안 일어난다.
+     * (해군복지포탈 예약 페이지에서 실제로 그랬다 — 탭이 그대로 남아 있었다)
+     * 메뉴의 새로고침은 URL 을 다시 로드하므로 페이지가 초기 상태로 돌아온다.
+     *
+     * @return 시도했으면 결과, 메뉴 자체를 못 찾았으면 null (다음 방법으로 넘어가라는 뜻)
+     */
+    private suspend fun refreshViaBrowserMenu(waitMs: Long): RefreshResult? {
+        val menu = findNodeByLabels(MENU_LABELS) ?: return null
+
+        // 메뉴가 실제로 열렸는지 먼저 확인한다.
+        // 안 열렸는데 뒤로가기를 누르면 브라우저가 이전 페이지로 넘어가 버린다.
+        val beforeMenu = snapshotInfo()
+        val baseMenu = subtreeEventCount
+        clickNodeOrGesture(menu)
+        val opened = awaitScreenChange(beforeMenu, baseMenu, 1_500, 1)
+        if (!opened) {
+            Log.i(TAG, "menu button clicked but menu did not open - skip (no BACK)")
+            return null
+        }
+
+        val reload = findNodeByLabels(REFRESH_LABELS)
+        if (reload == null) {
+            Log.i(TAG, "browser menu opened but no reload item found - closing menu")
+            // 메뉴가 열린 것이 확인된 상태에서만 뒤로가기로 닫는다. (페이지 이동이 아니라 메뉴 닫기)
+            try {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            } catch (_: Throwable) {
+            }
+            delay(400)
+            return null
+        }
+
+        val before = snapshotInfo()
+        val base = subtreeEventCount
+        clickNodeOrGesture(reload)
+        return if (awaitReload(before, base, 6_000)) {
+            delay(waitMs)
+            RefreshResult(true, "browser-menu", "브라우저 메뉴에서 새로고침")
+        } else {
+            Log.i(TAG, "browser menu reload clicked but no reload detected")
+            null
+        }
+    }
+
+    /** 주어진 라벨(텍스트 또는 contentDescription) 중 하나에 해당하는, 클릭 가능한 노드를 찾는다. */
+    private fun findNodeByLabels(labels: List<String>): AccessibilityNodeInfo? {
+        val wanted = labels.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
         for (root in rootNodes()) {
             var hit: AccessibilityNodeInfo? = null
             forEachNode(root) { n ->
                 val t = TextNorm.of(nodeText(n))
-                if (t.isEmpty() || t.length > 20) return@forEachNode false
-                if (REFRESH_LABELS.none { t.contains(TextNorm.of(it)) }) return@forEachNode false
+                if (t.isEmpty() || t.length > 24) return@forEachNode false
+                if (wanted.none { t.contains(it) }) return@forEachNode false
                 val visible = try {
                     n.isVisibleToUser
                 } catch (e: Throwable) {
@@ -756,15 +906,6 @@ class ScanService : AccessibilityService(), ScreenScanner {
             if (found != null) return found
         }
         return null
-    }
-
-    override suspend fun pressBack(): Boolean = withContext(Dispatchers.Main) {
-        try {
-            performGlobalAction(GLOBAL_ACTION_BACK)
-        } catch (e: Throwable) {
-            Log.w(TAG, "back failed", e)
-            false
-        }
     }
 
     // ------------------------------------------------------------------ 제스처

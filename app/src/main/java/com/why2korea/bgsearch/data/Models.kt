@@ -37,9 +37,6 @@ data class SearchConfig(
     /** 2차(+3차) 문자열을 최종 발견하면 재검색을 자동으로 정지할지 (기본 켬) */
     val stopWhenFound: Boolean = true,
 
-    /** 새로고침이 실패했을 때 뒤로가기로 이전 화면에 복귀할지 (기본 켬) */
-    val backOnRefreshFail: Boolean = true,
-
     /** 스크롤 1스텝 크기 (화면 높이 대비 비율) */
     val scrollRatio: Float = 0.6f,
     /** 스텝 간 대기시간 (ms) */
@@ -50,8 +47,19 @@ data class SearchConfig(
     /** 버블 탭으로도 시작/정지를 토글할지 여부 */
     val bubbleTapToggles: Boolean = true,
 
-    /** 당겨서 새로고침 후 대기시간 (ms) */
-    val refreshWaitMs: Long = 5_000L,
+    /** 문자열을 못 찾았을 때, 새로고침을 시작하기 **전에** 쉬는 시간 (ms) */
+    val preRefreshWaitMs: Long = 5_000L,
+
+    /** 새로고침 **후** 페이지가 안정되기를 기다리는 시간 (ms) */
+    val refreshWaitMs: Long = 3_000L,
+
+    /**
+     * 라운드 시작 시 1차 문자열이 화면에 나타나기를 기다리는 **최대** 시간 (ms).
+     *
+     * 목록을 나중에 불러오는(AJAX) 페이지는 새로고침 직후에는 내용이 비어 있다.
+     * 고정 대기로는 맞추기 어려우므로, 1차 문자열이 보일 때까지 폴링하고 보이면 즉시 진행한다.
+     */
+    val contentWaitMs: Long = 25_000L,
 
     /** 0 = 무제한 */
     val maxRounds: Int = 0,

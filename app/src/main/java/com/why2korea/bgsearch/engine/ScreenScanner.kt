@@ -10,13 +10,22 @@ data class ScreenSnapshotInfo(
     val packageName: String
 )
 
-/** 1차 문자열 클릭 시도 결과. */
+/**
+ * 1차 문자열 클릭 시도 결과.
+ *
+ * [clicked] 는 "클릭 동작이 실제로 전달됐는가" 이고, [changed] 는 "그 결과 화면이 바뀌었는가" 다.
+ * 이 둘을 분리한 이유: 클릭이 정상으로 들어가도 결과가 비어 있어 화면이 그대로인 페이지가 있다.
+ * (해군복지포탈 잔여티 페이지 — 남은 티가 없으면 선택해도 목록이 비어 화면이 안 바뀐다)
+ * 화면 변화를 성공 조건으로 삼으면 이런 경우를 클릭 실패로 오판해 루프가 진행되지 않는다.
+ */
 data class ClickResult(
     val found: Boolean,
     val clicked: Boolean,
     /** ACTION_CLICK / gesture-tap / none */
     val method: String,
     val snippet: String = "",
+    /** 클릭 후 화면 변화가 관찰됐는지 (참고용, 성공 판정에는 쓰지 않는다) */
+    val changed: Boolean = false,
     val error: String? = null
 )
 
@@ -73,8 +82,10 @@ interface ScreenScanner {
      * (ACTION_CLICK 이 true 를 돌려주고도 실제로는 아무 일도 일어나지 않는 웹페이지가 있다)
      *
      * @param preferGesture true 면 좌표 탭 제스처를 먼저 시도한다
+     * @param verifyMs 클릭이 화면에 반영됐는지 기다리는 시간.
+     *   클릭 후 목록을 뒤늦게 불러오는 페이지가 있어 짧으면 멀쩡한 클릭도 실패로 오판한다.
      */
-    suspend fun clickText(text: String, preferGesture: Boolean): ClickResult
+    suspend fun clickText(text: String, preferGesture: Boolean, verifyMs: Long): ClickResult
 
     /**
      * 2차 문자열이 있는 "줄"을 찾는다. 3차 문자열이 주어지면 같은 줄에 그것까지 있어야 한다.
@@ -90,6 +101,23 @@ interface ScreenScanner {
         doClick: Boolean
     ): RowHit?
 
+    /**
+     * 주어진 문자열이 화면에 나타날 때까지 기다린다. 나타나면 즉시 true.
+     * 목록을 나중에 불러오는 페이지에서 "아직 안 뜬 상태"를 미발견으로 오판하지 않기 위한 것.
+     */
+    suspend fun awaitTextAppear(text: String, timeoutMs: Long): Boolean
+
+    /**
+     * 클릭 직후 화면 내용이 실제로 채워질 때까지 기다린다.
+     *
+     * 목록을 눌러도 결과가 AJAX 로 뒤늦게 오는 페이지가 있다. 고정 대기로 넘어가면
+     * 아직 빈 화면을 스캔해 "미발견 + 바닥 도달" 로 잘못 판정한다.
+     * 내용이 늘어나면 안정될 때까지 조금 더 기다렸다가 돌아온다.
+     *
+     * @return 내용이 늘어난 것을 확인했으면 true (시간 내에 안 늘어나면 false)
+     */
+    suspend fun awaitContentGrow(before: ScreenSnapshotInfo, timeoutMs: Long): Boolean
+
     /** 한 스텝 아래로 스크롤. 실제로 내려갔으면 true */
     suspend fun scrollDown(ratio: Float): Boolean
 
@@ -102,9 +130,6 @@ interface ScreenScanner {
      * 한 방법이 실패하면 다음 방법으로 넘어간다.
      */
     suspend fun refreshPage(waitMs: Long): RefreshResult
-
-    /** 뒤로가기 */
-    suspend fun pressBack(): Boolean
 
     /** 화면 캡처 저장. 미지원(API 30 미만)이거나 실패하면 false */
     suspend fun takeScreenshot(target: java.io.File): Boolean

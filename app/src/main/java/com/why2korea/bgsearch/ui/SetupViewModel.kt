@@ -143,11 +143,12 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     fun setAfterClickWait(v: Long) = mutate { it.copy(afterClickWaitMs = v.coerceIn(0L, 60_000L)) }
     fun setPreferGestureTap(v: Boolean) = mutate { it.copy(preferGestureTap = v) }
     fun setStopWhenFound(v: Boolean) = mutate { it.copy(stopWhenFound = v) }
-    fun setBackOnRefreshFail(v: Boolean) = mutate { it.copy(backOnRefreshFail = v) }
     fun setRatio(v: Float) = mutate { it.copy(scrollRatio = v.coerceIn(0.1f, 1.2f)) }
     fun setStepDelay(v: Long) = mutate { it.copy(stepDelayMs = v.coerceIn(200L, 30_000L)) }
     fun setStartDelay(v: Long) = mutate { it.copy(startDelayMs = v.coerceIn(1_000L, 60_000L)) }
     fun setBubbleTapToggles(v: Boolean) = mutate { it.copy(bubbleTapToggles = v) }
+    fun setPreRefreshWait(v: Long) = mutate { it.copy(preRefreshWaitMs = v.coerceIn(0L, 300_000L)) }
+    fun setContentWait(v: Long) = mutate { it.copy(contentWaitMs = v.coerceIn(0L, 120_000L)) }
     fun setRefreshWait(v: Long) =
         mutate { it.copy(refreshWaitMs = v.coerceAtLeast(SearchEngine.MIN_REFRESH_MS)) }
 
