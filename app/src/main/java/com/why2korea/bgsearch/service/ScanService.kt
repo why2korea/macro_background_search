@@ -67,40 +67,11 @@ class ScanService : AccessibilityService(), ScreenScanner {
         /** 이 횟수 이상 서브트리가 통째로 바뀌면 새로고침이 일어난 것으로 본다. */
         private const val RELOAD_EVENT_THRESHOLD = 2
 
-        /** 클릭이 먹었는지 확인하는 시간 */
-        private const val CLICK_VERIFY_MS = 1_200L
-
         /** 클릭 판정용 서브트리 교체 이벤트 임계치 (새로고침보다 느슨하게) */
         private const val CLICK_EVENT_THRESHOLD = 1
 
         /** 내용이 채워진 뒤 안정될 때까지 더 기다리는 최대 시간 */
         private const val CONTENT_SETTLE_MAX_MS = 4_000L
-
-        /** 새로고침 컨트롤로 인정할 텍스트 (정규화 후 부분 일치) */
-        private val REFRESH_LABELS = listOf(
-            "새로고침", "새로 고침", "refresh", "reload", "다시 시도", "다시시도", "재시도"
-        )
-
-        /** 브라우저 오버플로(더보기) 메뉴 버튼으로 인정할 텍스트 */
-        private val MENU_LABELS = listOf(
-            "맞춤설정 및 제어", "더보기", "옵션 더보기", "메뉴",
-            "customize and control", "more options", "menu"
-        )
-
-        /**
-         * 오버플로 메뉴로 새로고침을 시도할 브라우저 패키지.
-         * 브라우저가 아닌 앱에서 "더보기" 를 눌렀다가 엉뚱한 동작을 하면 안 되므로 화이트리스트로 제한한다.
-         */
-        private val BROWSER_PACKAGES = listOf(
-            "com.android.chrome",
-            "com.google.android.apps.chrome",
-            "com.sec.android.app.sbrowser",
-            "org.mozilla.firefox",
-            "com.naver.whale",
-            "com.microsoft.emmx",
-            "com.opera.browser",
-            "com.brave.browser"
-        )
 
         /** 접근성 서비스가 설정에서 켜져 있는지 확인. */
         fun isEnabled(ctx: Context): Boolean {
@@ -758,34 +729,23 @@ class ScanService : AccessibilityService(), ScreenScanner {
         scrollToTop(30)
         delay(300)
 
-        // 1) 화면에 이미 보이는 명시적 새로고침 컨트롤
-        val control = findNodeByLabels(REFRESH_LABELS)
-        if (control != null) {
-            val before = snapshotInfo()
-            val base = subtreeEventCount
-            clickNodeOrGesture(control)
-            if (awaitReload(before, base, 4_000)) {
-                delay(waitMs)
-                return@withContext RefreshResult(true, "refresh-control", "새로고침 버튼 클릭")
-            }
-            Log.i(TAG, "refresh control clicked but no reload detected")
-        }
+        // 당겨서 새로고침 **한 번만** 한다.
+        //
+        // 예전에는 (a) 화면의 새로고침 컨트롤 클릭, (b) 브라우저 오버플로 메뉴의 새로고침,
+        // (c) 당겨서 새로고침 을 순서대로 시도했다. 그런데
+        //  - (b) 가 사이트 자체의 햄버거(☰) 메뉴를 눌러 다른 페이지로 넘어가 버렸다.
+        //  - 앞단의 scrollToTop 이 "아래로 쓸어내리기" 를 반복했는데, 크롬에서는 그게 전부
+        //    pull-to-refresh 로 먹혀 짧은 시간에 새로고침이 수십 번 일어났다.
+        // 둘 다 제거하고, 제스처 없이 맨 위로 올린 뒤 당겨서 새로고침 1회만 수행한다.
+        scrollToTopNoGesture()
+        delay(300)
 
-        // 2) 브라우저라면 오버플로 메뉴의 [새로고침] 을 직접 누른다.
-        //    당겨서 새로고침은 페이지가 아니라 내부 스크롤 영역에 먹혀서 실패하는 경우가 많다.
-        //    메뉴 새로고침은 URL 을 다시 로드하므로 페이지가 초기 상태로 돌아온다.
-        if (currentPackage() in BROWSER_PACKAGES) {
-            val r = refreshViaBrowserMenu(waitMs)
-            if (r != null) return@withContext r
-        }
-
-        // 3) 당겨서 새로고침 (느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다)
         val before = snapshotInfo()
         val base = subtreeEventCount
         val h = screenHeight()
         val w = screenWidth()
         swipe(w * 0.5f, h * 0.18f, w * 0.5f, h * 0.82f, 700)
-        if (awaitReload(before, base, 5_000)) {
+        if (awaitReload(before, base, 6_000)) {
             delay(waitMs)
             return@withContext RefreshResult(
                 true, "pull-to-refresh", "당겨서 새로고침 (이벤트 ${subtreeEventCount - base}건)"
@@ -837,85 +797,23 @@ class ScanService : AccessibilityService(), ScreenScanner {
         return false
     }
 
-    private fun currentPackage(): String =
-        try {
-            rootNodes().firstOrNull()?.packageName?.toString() ?: ""
-        } catch (e: Throwable) {
-            ""
-        }
-
     /**
-     * 브라우저 오버플로(더보기) 메뉴를 열어 [새로고침] 을 누른다.
+     * 제스처를 쓰지 않고 맨 위로 올린다.
      *
-     * 당겨서 새로고침은 페이지가 아니라 내부 스크롤 영역이 먹어버리면 아무 일도 안 일어난다.
-     * (해군복지포탈 예약 페이지에서 실제로 그랬다 — 탭이 그대로 남아 있었다)
-     * 메뉴의 새로고침은 URL 을 다시 로드하므로 페이지가 초기 상태로 돌아온다.
-     *
-     * @return 시도했으면 결과, 메뉴 자체를 못 찾았으면 null (다음 방법으로 넘어가라는 뜻)
+     * 아래로 쓸어내리는 제스처는 크롬에서 pull-to-refresh 로 먹힌다.
+     * 새로고침 직전에 위치를 맞추는 용도라면 절대 제스처를 쓰면 안 된다.
      */
-    private suspend fun refreshViaBrowserMenu(waitMs: Long): RefreshResult? {
-        val menu = findNodeByLabels(MENU_LABELS) ?: return null
-
-        // 메뉴가 실제로 열렸는지 먼저 확인한다.
-        // 안 열렸는데 뒤로가기를 누르면 브라우저가 이전 페이지로 넘어가 버린다.
-        val beforeMenu = snapshotInfo()
-        val baseMenu = subtreeEventCount
-        clickNodeOrGesture(menu)
-        val opened = awaitScreenChange(beforeMenu, baseMenu, 1_500, 1)
-        if (!opened) {
-            Log.i(TAG, "menu button clicked but menu did not open - skip (no BACK)")
-            return null
-        }
-
-        val reload = findNodeByLabels(REFRESH_LABELS)
-        if (reload == null) {
-            Log.i(TAG, "browser menu opened but no reload item found - closing menu")
-            // 메뉴가 열린 것이 확인된 상태에서만 뒤로가기로 닫는다. (페이지 이동이 아니라 메뉴 닫기)
-            try {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-            } catch (_: Throwable) {
+    private suspend fun scrollToTopNoGesture() {
+        for (i in 0 until 10) {
+            val node = scrollableNode() ?: return
+            val moved = try {
+                node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+            } catch (e: Throwable) {
+                false
             }
-            delay(400)
-            return null
+            if (!moved) return
+            delay(200)
         }
-
-        val before = snapshotInfo()
-        val base = subtreeEventCount
-        clickNodeOrGesture(reload)
-        return if (awaitReload(before, base, 6_000)) {
-            delay(waitMs)
-            RefreshResult(true, "browser-menu", "브라우저 메뉴에서 새로고침")
-        } else {
-            Log.i(TAG, "browser menu reload clicked but no reload detected")
-            null
-        }
-    }
-
-    /** 주어진 라벨(텍스트 또는 contentDescription) 중 하나에 해당하는, 클릭 가능한 노드를 찾는다. */
-    private fun findNodeByLabels(labels: List<String>): AccessibilityNodeInfo? {
-        val wanted = labels.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
-        for (root in rootNodes()) {
-            var hit: AccessibilityNodeInfo? = null
-            forEachNode(root) { n ->
-                val t = TextNorm.of(nodeText(n))
-                if (t.isEmpty() || t.length > 24) return@forEachNode false
-                if (wanted.none { t.contains(it) }) return@forEachNode false
-                val visible = try {
-                    n.isVisibleToUser
-                } catch (e: Throwable) {
-                    true
-                }
-                if (visible && clickableAncestor(n) != null) {
-                    hit = n
-                    true
-                } else {
-                    false
-                }
-            }
-            val found = hit
-            if (found != null) return found
-        }
-        return null
     }
 
     // ------------------------------------------------------------------ 제스처

@@ -56,8 +56,8 @@ class SearchEngine(
         const val CLICK_RETRY_MAX = 3
         const val PRIMARY_FAIL_WARN_AT = 5
         const val REFRESH_FAIL_WARN_AT = 5
-        /** 새로고침 시도 횟수 (뒤로가기 폴백 없이 이 횟수만큼 재시도) */
-        const val REFRESH_ATTEMPTS = 3
+        /** 당겨서 새로고침 시도 횟수. 짧은 시간에 여러 번 새로고침되지 않도록 2회로 제한한다. */
+        const val REFRESH_ATTEMPTS = 2
         /** 줄 클릭 후 화면이 바뀔 시간을 준 뒤 캡처한다 */
         const val AFTER_ROW_CLICK_WAIT_MS = 1_200L
         const val BOTTOM_STABLE_COUNT = 3
@@ -254,20 +254,23 @@ class SearchEngine(
 
                 // 결과가 AJAX 로 뒤늦게 오는 페이지가 있다. 고정 대기만으로 넘어가면
                 // 아직 빈 화면을 스캔해 "미발견 + 바닥 도달" 로 잘못 판정한다.
-                val base = preClick
-                if (base != null && cfg.contentWaitMs > 0) {
-                    // 이미 목록이 떠 있으면 기다릴 필요가 없다.
-                    // (새로고침 뒤에도 선택이 유지돼 클릭 전부터 내용이 있는 경우가 있다)
-                    val already = scanner.findRowAndClick(
-                        cfg.secondaries(), cfg.matchAll, cfg.tertiaries(), false
-                    ) != null
-                    if (already) {
-                        log("클릭 결과가 이미 화면에 있음 - 대기 생략")
-                    } else {
-                        status("클릭 결과 로딩 대기 (최대 ${cfg.contentWaitMs / 1000}초)")
-                        val grew = scanner.awaitContentGrow(base, cfg.contentWaitMs)
-                        log(if (grew) "클릭 결과 로딩 확인" else "클릭 결과가 시간 내에 채워지지 않음 - 그대로 스캔")
+                // 목록이 늦게 오는 페이지 대응.
+                // 조건에 맞는 줄이 보이면 즉시 넘어가고, 안 보이면 최대 대기시간까지만 기다린다.
+                if (cfg.contentWaitMs > 0) {
+                    status("클릭 결과 로딩 대기 (최대 ${cfg.contentWaitMs / 1000}초)")
+                    val deadline = System.currentTimeMillis() + cfg.contentWaitMs
+                    var seen = false
+                    while (scope.isActive && System.currentTimeMillis() < deadline) {
+                        if (scanner.findRowAndClick(
+                                cfg.secondaries(), cfg.matchAll, cfg.tertiaries(), false
+                            ) != null
+                        ) {
+                            seen = true
+                            break
+                        }
+                        delay(700)
                     }
+                    log(if (seen) "클릭 결과 로딩 확인" else "대기시간 안에 조건에 맞는 줄이 없음 - 스캔으로 확인")
                 }
 
                 // ---------------- 5. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
