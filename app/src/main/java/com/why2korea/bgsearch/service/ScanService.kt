@@ -73,6 +73,12 @@ class ScanService : AccessibilityService(), ScreenScanner {
         /** 내용이 채워진 뒤 안정될 때까지 더 기다리는 최대 시간 */
         private const val CONTENT_SETTLE_MAX_MS = 4_000L
 
+        /**
+         * 당겨서 새로고침 제스처 최소 간격.
+         * 어떤 경로로 연달아 호출돼도 이 간격 안에는 두 번 나가지 않는다.
+         */
+        private const val MIN_PULL_INTERVAL_MS = 5_000L
+
         /** 접근성 서비스가 설정에서 켜져 있는지 확인. */
         fun isEnabled(ctx: Context): Boolean {
             val expected = ComponentName(ctx, ScanService::class.java)
@@ -97,6 +103,14 @@ class ScanService : AccessibilityService(), ScreenScanner {
     /** 화면 서브트리가 통째로 바뀐 횟수. 새로고침 판정에 쓴다. */
     @Volatile
     private var subtreeEventCount = 0
+
+    /** 마지막으로 당겨서 새로고침 제스처를 쏜 시각. 연속 발사를 막는다. */
+    @Volatile
+    private var lastPullAtMs = 0L
+
+    /** 당겨서 새로고침 누적 횟수 (로그 확인용) */
+    @Volatile
+    private var pullCount = 0
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -678,26 +692,26 @@ class ScanService : AccessibilityService(), ScreenScanner {
         snapshotInfo().contentHash != before
     }
 
+    /**
+     * 맨 위로 올린다. **아래로 쓸어내리는 제스처는 절대 쓰지 않는다.**
+     *
+     * 예전에는 ACTION_SCROLL_BACKWARD 가 실패하면 아래로 쓸기로 대체했는데,
+     * 크롬에서 화면 맨 위에서의 아래로 쓸기는 그 자체가 pull-to-refresh 다.
+     * maxSteps 만큼 반복하면서 새로고침이 수십 번 일어났다. (실기기에서 20회 이상 확인)
+     */
     override suspend fun scrollToTop(maxSteps: Int): Boolean = withContext(Dispatchers.Main) {
         if (!hasTarget()) return@withContext false
-        val h = screenHeight()
-        val w = screenWidth()
         var unchanged = 0
-        for (i in 0 until maxSteps) {
+        for (i in 0 until maxSteps.coerceAtMost(10)) {
             val before = snapshotInfo().contentHash
-            val node = scrollableNode()
-            var moved = false
-            if (node != null) {
-                moved = try {
-                    node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-                } catch (e: Throwable) {
-                    false
-                }
+            val node = scrollableNode() ?: return@withContext true
+            val moved = try {
+                node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+            } catch (e: Throwable) {
+                false
             }
-            if (!moved) {
-                swipe(w * 0.5f, h * 0.25f, w * 0.5f, h * 0.80f, 280)
-            }
-            delay(320)
+            if (!moved) return@withContext true
+            delay(250)
             if (snapshotInfo().contentHash == before) {
                 unchanged++
                 if (unchanged >= 2) return@withContext true
@@ -711,32 +725,28 @@ class ScanService : AccessibilityService(), ScreenScanner {
     // ------------------------------------------------------------------ 새로고침
 
     /**
-     * 페이지를 실제로 새로고침한다.
+     * 페이지를 새로고침한다. 수단은 **당겨서 새로고침 제스처 하나뿐**이고, 호출당 **정확히 1회**만 쏜다.
      *
-     * 제스처를 보낸 것만으로 성공으로 치지 않는다. 새로고침이 일어나면 화면이 잠깐
-     * 비거나 다시 그려지므로, 트리거 직후 화면을 계속 관찰해 그 변화를 확인한다.
-     * 확인되지 않으면 다음 방법으로 넘어간다.
+     * 아래로 쓸어내리는 제스처는 이 함수 안의 딱 한 줄이 전부다.
+     * 다른 곳에서 아래로 쓸면 크롬이 그걸 전부 새로고침으로 받아들여 폭주한다.
+     * (실기기에서 20회 이상 확인된 실제 사고)
      *
-     *  1) 화면에 있는 명시적 새로고침 컨트롤 클릭
-     *  2) 당겨서 새로고침 제스처 (크롬·삼성인터넷은 기본 지원)
-     *
-     * 둘 다 실패하면 ok=false 를 돌려주고, 뒤로가기 복귀는 호출자(엔진)가 판단한다.
+     * 추가 안전장치로 최소 간격을 둔다. 어떤 경로로 연달아 호출되더라도
+     * [MIN_PULL_INTERVAL_MS] 안에는 두 번 나가지 않는다.
      */
     override suspend fun refreshPage(waitMs: Long): RefreshResult = withContext(Dispatchers.Main) {
         if (!hasTarget()) {
             return@withContext RefreshResult(false, "no-target", "대상 화면이 없어 새로고침하지 않음")
         }
-        scrollToTop(30)
-        delay(300)
 
-        // 당겨서 새로고침 **한 번만** 한다.
-        //
-        // 예전에는 (a) 화면의 새로고침 컨트롤 클릭, (b) 브라우저 오버플로 메뉴의 새로고침,
-        // (c) 당겨서 새로고침 을 순서대로 시도했다. 그런데
-        //  - (b) 가 사이트 자체의 햄버거(☰) 메뉴를 눌러 다른 페이지로 넘어가 버렸다.
-        //  - 앞단의 scrollToTop 이 "아래로 쓸어내리기" 를 반복했는데, 크롬에서는 그게 전부
-        //    pull-to-refresh 로 먹혀 짧은 시간에 새로고침이 수십 번 일어났다.
-        // 둘 다 제거하고, 제스처 없이 맨 위로 올린 뒤 당겨서 새로고침 1회만 수행한다.
+        val since = System.currentTimeMillis() - lastPullAtMs
+        if (since < MIN_PULL_INTERVAL_MS) {
+            val wait = MIN_PULL_INTERVAL_MS - since
+            Log.i(TAG, "pull-to-refresh rate limit: waiting ${wait}ms")
+            delay(wait)
+        }
+
+        // 제스처 없이 맨 위로 (아래로 쓸면 그게 곧 새로고침이라 절대 쓰면 안 된다)
         scrollToTopNoGesture()
         delay(300)
 
@@ -744,15 +754,20 @@ class ScanService : AccessibilityService(), ScreenScanner {
         val base = subtreeEventCount
         val h = screenHeight()
         val w = screenWidth()
+
+        lastPullAtMs = System.currentTimeMillis()
+        pullCount++
+        Log.i(TAG, "pull-to-refresh #$pullCount")
         swipe(w * 0.5f, h * 0.18f, w * 0.5f, h * 0.82f, 700)
+
         if (awaitReload(before, base, 6_000)) {
             delay(waitMs)
             return@withContext RefreshResult(
-                true, "pull-to-refresh", "당겨서 새로고침 (이벤트 ${subtreeEventCount - base}건)"
+                true, "pull-to-refresh", "당겨서 새로고침 1회 (누적 ${pullCount}회)"
             )
         }
 
-        RefreshResult(false, "none", "새로고침이 확인되지 않음")
+        RefreshResult(false, "none", "새로고침이 확인되지 않음 (누적 ${pullCount}회)")
     }
 
     /**

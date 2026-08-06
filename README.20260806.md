@@ -750,3 +750,65 @@ v2.2.0 에서 "후보 중 텍스트가 가장 짧은 노드를 고른다" 규칙
 - 그래서 1차 문자열을 `평택` 으로 두어 **평택(만포대)** 탭을 클릭하게 한다.
 - 평택 목록은 클릭 후 **약 30초** 뒤에 채워진다. 그래서 라운드가 약 40초 걸린다.
   `1차 문자열 등장 대기` 를 35000 이상으로 두면 로그가 더 깔끔해진다.
+
+---
+
+## 14. v2.5.1 — 새로고침 폭주 완전 차단 (2026-08-06)
+
+v2.5.0 에서 고쳤다고 했는데 **여전히 순식간에 20회 이상 새로고침이 일어났다.**
+
+### 14-1. [원인] 제거했다고 생각한 호출이 그대로 남아 있었다
+
+v2.5.0 에서 `scrollToTopNoGesture()` 를 새로 만들어 넣었지만,
+**그 위에 있던 기존 `scrollToTop(30)` 호출을 지우지 않았다.**
+
+```kotlin
+override suspend fun refreshPage(waitMs: Long) ... {
+    scrollToTop(30)          // ← 남아 있던 호출. 아래로 쓸기 최대 30회 = 새로고침 20+회
+    delay(300)
+    scrollToTopNoGesture()   // ← 새로 넣은 것
+    ...
+}
+```
+
+`scrollToTop` 은 `ACTION_SCROLL_BACKWARD` 가 실패하면 아래로 쓸기로 대체하는데,
+크롬에서 맨 위에서의 아래로 쓸기는 그 자체가 pull-to-refresh 다.
+
+### 14-2. 수정
+
+1. `refreshPage` 에서 `scrollToTop(30)` 호출 삭제
+2. `scrollToTop` 자체에서 **아래로 쓸기 폴백을 완전히 제거** —
+   이제 `ACTION_SCROLL_BACKWARD` 만 쓰고, 실패하면 즉시 반환한다. 반복 횟수도 10회로 제한.
+3. **최소 간격 안전장치** — `MIN_PULL_INTERVAL_MS = 5000`.
+   어떤 경로로 연달아 호출돼도 5초 안에는 두 번 나가지 않는다.
+4. **발사 횟수 로그** — 제스처를 쏠 때마다 `pull-to-refresh #N` 을 남긴다.
+   이제 실제 횟수를 로그로 바로 셀 수 있다.
+
+### 14-3. 아래로 쓸기 호출 지점 (전수 확인)
+
+소스 전체에서 아래로 쓸어내리는 제스처는 **`refreshPage` 안의 한 줄이 전부**다.
+
+```
+ScanService.kt:689  swipe(w*0.5, startY, w*0.5, endY, 320)      ← scrollDown, 위로 쓸기(endY < startY)
+ScanService.kt:761  swipe(w*0.5, h*0.18, w*0.5, h*0.82, 700)    ← 유일한 아래로 쓸기 = 새로고침
+```
+
+### 14-4. 실기기 검증
+
+```
+BgSearchScan:   pull-to-refresh #1        ← 제스처 발사 총 1회
+BgSearchEngine: 새로고침 확인됨 [pull-to-refresh]
+BgSearchEngine: 1차 문자열 등장 확인
+BgSearchEngine: 1차 클릭 [ACTION_CLICK] "평택(만포대)"
+BgSearchEngine: 줄 발견: [09일] + [06시] · "08월 09일 a코스 18홀 06시 00분"
+BgSearchEngine: 줄 클릭 성공 → 발견! → 스크린샷 → 발견 후 자동 정지
+```
+
+라운드당 새로고침 **1회**, 페이지 이탈 없음, 발견까지 정상.
+
+### 14-5. 앞으로 확인하는 법
+
+```bash
+adb logcat -d | grep "pull-to-refresh #"
+```
+이 줄 개수가 곧 실제 새로고침 횟수다.
