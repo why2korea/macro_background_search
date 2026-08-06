@@ -129,9 +129,10 @@ class OverlayService : Service(), EngineHost, OverlayActions {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureForeground(lastStatus)
         when (intent?.action) {
+            // [버블만 띄우기] — 이름 그대로 버블만 띄운다. 패널을 열면 대상 앱을 가려 버린다.
             ACTION_SHOW_OVERLAY -> {
                 setupOverlay()
-                onExpand()
+                onCollapse()
             }
 
             ACTION_START_SEARCH -> {
