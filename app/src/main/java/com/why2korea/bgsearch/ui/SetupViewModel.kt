@@ -140,6 +140,9 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setMatchAll(v: Boolean) = mutate { it.copy(matchAll = v) }
     fun setClickFoundRow(v: Boolean) = mutate { it.copy(clickFoundRow = v) }
+    fun setAfterClickWait(v: Long) = mutate { it.copy(afterClickWaitMs = v.coerceIn(0L, 60_000L)) }
+    fun setPreferGestureTap(v: Boolean) = mutate { it.copy(preferGestureTap = v) }
+    fun setStopWhenFound(v: Boolean) = mutate { it.copy(stopWhenFound = v) }
     fun setBackOnRefreshFail(v: Boolean) = mutate { it.copy(backOnRefreshFail = v) }
     fun setRatio(v: Float) = mutate { it.copy(scrollRatio = v.coerceIn(0.1f, 1.2f)) }
     fun setStepDelay(v: Long) = mutate { it.copy(stepDelayMs = v.coerceIn(200L, 30_000L)) }

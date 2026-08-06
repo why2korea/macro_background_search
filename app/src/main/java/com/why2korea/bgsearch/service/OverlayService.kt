@@ -321,7 +321,17 @@ class OverlayService : Service(), EngineHost, OverlayActions {
     override fun onResumeSearch() {
         notifier.cancelFound()
         overlay?.hideBanner()
-        engine.resume()
+        if (engine.isRunning) {
+            engine.resume()
+            return
+        }
+        // 발견 후 자동 정지된 상태에서 누른 경우 → 다시 시작.
+        // 이미 대상 화면을 보고 있을 테니 카운트다운 없이 바로 시작한다.
+        SearchBus.update { it.copy(phase = Phase.IDLE, foundTexts = emptyList(), foundRowText = "") }
+        scope.launch {
+            config = runCatching { store.loadConfig() }.getOrDefault(config)
+            doStartSearch(withCountdown = false)
+        }
     }
 
     override fun onDismissBanner() {

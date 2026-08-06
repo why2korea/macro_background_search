@@ -313,6 +313,19 @@ private fun InputCard(state: SetupUiState, vm: SetupViewModel) {
                 checked = cfg.clickFoundRow,
                 onChange = vm::setClickFoundRow
             )
+            SwitchRow(
+                label = "발견하면 재검색 자동 정지",
+                checked = cfg.stopWhenFound,
+                onChange = vm::setStopWhenFound
+            )
+            Text(
+                if (cfg.stopWhenFound)
+                    "발견 즉시 탐색을 멈춥니다. 배너의 [다시 시작] 으로 다시 돌릴 수 있습니다."
+                else
+                    "발견하면 일시정지만 하고, [계속] 을 누르면 이어서 탐색합니다.",
+                fontSize = 11.sp,
+                color = Color(0xFF757575)
+            )
 
             Box {
                 OutlinedButton(
@@ -353,6 +366,27 @@ private fun AdvancedCard(state: SetupUiState, vm: SetupViewModel) {
                 NumberField("스텝 간 대기 (ms)", cfg.stepDelayMs.toString()) {
                     vm.setStepDelay(it.toLongOrNull() ?: cfg.stepDelayMs)
                 }
+                NumberField(
+                    "1차 클릭 후 2차 탐색까지 대기 (ms)",
+                    cfg.afterClickWaitMs.toString()
+                ) { vm.setAfterClickWait(it.toLongOrNull() ?: cfg.afterClickWaitMs) }
+                Text(
+                    "클릭한 화면이 다 뜰 때까지 기다리는 시간입니다. 기본 2000ms.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
+                )
+                Spacer(Modifier.height(4.dp))
+                SwitchRow(
+                    label = "1차 클릭에 좌표 탭 우선 사용",
+                    checked = cfg.preferGestureTap,
+                    onChange = vm::setPreferGestureTap
+                )
+                Text(
+                    "클릭이 성공했다고 나오는데 실제로는 아무 일도 안 일어나면 켜세요. " +
+                        "사람이 손가락으로 누른 것과 같은 방식으로 동작합니다.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF757575)
+                )
                 NumberField("시작 카운트다운 (ms)", cfg.startDelayMs.toString()) {
                     vm.setStartDelay(it.toLongOrNull() ?: cfg.startDelayMs)
                 }

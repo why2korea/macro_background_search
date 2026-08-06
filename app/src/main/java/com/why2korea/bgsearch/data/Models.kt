@@ -24,6 +24,19 @@ data class SearchConfig(
     /** 발견한 줄을 한 번 클릭한 뒤에 알림 처리할지 (기본 켬) */
     val clickFoundRow: Boolean = true,
 
+    /** 1차 문자열을 클릭한 뒤 2차 탐색을 시작하기까지의 대기시간 (ms) */
+    val afterClickWaitMs: Long = 2_000L,
+
+    /**
+     * 1차 클릭 시 좌표 탭 제스처를 먼저 쓸지.
+     * ACTION_CLICK 이 성공을 반환하고도 실제로는 아무 일도 안 하는 웹페이지가 있다.
+     * 그런 화면에서는 이걸 켜면 사람이 손가락으로 누른 것과 같은 방식으로 동작한다.
+     */
+    val preferGestureTap: Boolean = false,
+
+    /** 2차(+3차) 문자열을 최종 발견하면 재검색을 자동으로 정지할지 (기본 켬) */
+    val stopWhenFound: Boolean = true,
+
     /** 새로고침이 실패했을 때 뒤로가기로 이전 화면에 복귀할지 (기본 켬) */
     val backOnRefreshFail: Boolean = true,
 

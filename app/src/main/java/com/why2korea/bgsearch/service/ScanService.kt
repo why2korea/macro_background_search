@@ -67,6 +67,12 @@ class ScanService : AccessibilityService(), ScreenScanner {
         /** 이 횟수 이상 서브트리가 통째로 바뀌면 새로고침이 일어난 것으로 본다. */
         private const val RELOAD_EVENT_THRESHOLD = 2
 
+        /** 클릭이 먹었는지 확인하는 시간 */
+        private const val CLICK_VERIFY_MS = 1_200L
+
+        /** 클릭 판정용 서브트리 교체 이벤트 임계치 (새로고침보다 느슨하게) */
+        private const val CLICK_EVENT_THRESHOLD = 1
+
         /** 새로고침 컨트롤로 인정할 텍스트 (정규화 후 부분 일치) */
         private val REFRESH_LABELS = listOf(
             "새로고침", "새로 고침", "refresh", "reload", "다시 시도", "다시시도", "재시도"
@@ -267,48 +273,30 @@ class ScanService : AccessibilityService(), ScreenScanner {
      * 화면에 보이는 노드를 우선한다.
      */
     private fun findNode(needleNorm: String): AccessibilityNodeInfo? {
-        var fallback: AccessibilityNodeInfo? = null
+        val candidates = ArrayList<AccessibilityNodeInfo>()
         for (root in rootNodes()) {
-            var hit: AccessibilityNodeInfo? = null
-            forEachNode(root) { n ->
-                val t = TextNorm.of(nodeText(n))
-                if (t.isEmpty() || !t.contains(needleNorm)) return@forEachNode false
-                // 자식이 같은 문자열을 가지면 더 안쪽이 있으므로 건너뛴다
-                var deeper = false
-                val count = try {
-                    n.childCount
-                } catch (e: Throwable) {
-                    0
-                }
-                for (i in 0 until count) {
-                    val c = try {
-                        n.getChild(i)
-                    } catch (e: Throwable) {
-                        null
-                    } ?: continue
-                    if (TextNorm.of(nodeText(c)).contains(needleNorm)) {
-                        deeper = true
-                        break
-                    }
-                }
-                if (deeper) return@forEachNode false
-                val visible = try {
-                    n.isVisibleToUser
-                } catch (e: Throwable) {
-                    true
-                }
-                if (visible) {
-                    hit = n
-                    true
-                } else {
-                    if (fallback == null) fallback = n
-                    false
-                }
-            }
-            val found = hit
-            if (found != null) return found
+            candidates.addAll(innermostNodesContainingAny(root, listOf(needleNorm)))
         }
-        return fallback
+        if (candidates.isEmpty()) return null
+
+        /*
+         * 후보가 여러 개면 "가장 근접한" 것을 고른다 = 자기 텍스트가 가장 짧은 노드.
+         *
+         * 크롬에서 확인한 실제 오작동: 페이지 본문의 링크 대신 주소창
+         * ("ko.wikipedia.org/wiki/평택시") 을 클릭했다. 주소창 텍스트는 링크 라벨보다 훨씬 길다.
+         * 화면에 보이는 노드를 우선하고, 그중 텍스트가 짧은 것을 고르면 이런 오선택이 걸러진다.
+         */
+        fun visible(n: AccessibilityNodeInfo): Boolean = try {
+            n.isVisibleToUser
+        } catch (e: Throwable) {
+            true
+        }
+
+        return candidates.minByOrNull { n ->
+            val len = TextNorm.of(nodeText(n)).length
+            // 보이는 노드에 큰 가산점 (짧더라도 안 보이는 노드보다 우선)
+            if (visible(n)) len else len + 100_000
+        }
     }
 
     private fun clickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -343,39 +331,82 @@ class ScanService : AccessibilityService(), ScreenScanner {
      */
     private fun hasTarget(): Boolean = rootNodes().isNotEmpty()
 
-    override suspend fun clickText(text: String): ClickResult = withContext(Dispatchers.Main) {
-        if (!hasTarget()) return@withContext ClickResult(false, false, "no-target")
-        val needle = TextNorm.of(text)
-        if (needle.isEmpty()) return@withContext ClickResult(false, false, "none", error = "empty")
-        val node = findNode(needle)
-            ?: return@withContext ClickResult(false, false, "none")
-
-        val snippet = nodeText(node).replace("\n", " ").take(60)
-
-        // 1순위: 클릭 가능한 조상에 ACTION_CLICK
-        val target = clickableAncestor(node)
-        if (target != null) {
-            val ok = try {
-                target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            } catch (e: Throwable) {
-                Log.w(TAG, "ACTION_CLICK failed", e)
-                false
+    override suspend fun clickText(text: String, preferGesture: Boolean): ClickResult =
+        withContext(Dispatchers.Main) {
+            if (!hasTarget()) return@withContext ClickResult(false, false, "no-target")
+            val needle = TextNorm.of(text)
+            if (needle.isEmpty()) {
+                return@withContext ClickResult(false, false, "none", error = "empty")
             }
-            if (ok) return@withContext ClickResult(true, true, "ACTION_CLICK", snippet)
+            val node = findNode(needle)
+                ?: return@withContext ClickResult(false, false, "none")
+
+            val snippet = nodeText(node).replace("\n", " ").take(60)
+
+            // 화면 밖에 있으면 좌표 탭이 헛나가므로 먼저 화면 안으로 끌어온다.
+            try {
+                node.performAction(
+                    AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id
+                )
+                delay(250)
+            } catch (e: Throwable) {
+                Log.w(TAG, "ACTION_SHOW_ON_SCREEN failed", e)
+            }
+
+            val methods = if (preferGesture) listOf("gesture-tap", "ACTION_CLICK")
+            else listOf("ACTION_CLICK", "gesture-tap")
+
+            var attempted = false
+            for (m in methods) {
+                val before = snapshotInfo()
+                val baseEv = subtreeEventCount
+                val fired = when (m) {
+                    "ACTION_CLICK" -> performNodeClick(node)
+                    else -> performGestureTap(node)
+                }
+                if (!fired) continue
+                attempted = true
+                // 클릭이 실제로 먹었는지 화면 변화로 확인한다.
+                if (awaitScreenChange(before, baseEv, CLICK_VERIFY_MS, CLICK_EVENT_THRESHOLD)) {
+                    return@withContext ClickResult(true, true, m, snippet)
+                }
+                Log.i(TAG, "click via $m produced no screen change - trying next")
+            }
+
+            ClickResult(
+                found = true,
+                clicked = false,
+                method = "none",
+                snippet = snippet,
+                error = if (attempted) "화면 변화 없음" else "클릭 수단 없음"
+            )
         }
 
-        // 2순위: 노드 좌표 한가운데를 탭하는 제스처
+    /** 클릭 가능한 조상에 ACTION_CLICK. 실제로 액션을 쐈으면 true */
+    private fun performNodeClick(node: AccessibilityNodeInfo): Boolean {
+        val target = clickableAncestor(node) ?: return false
+        return try {
+            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } catch (e: Throwable) {
+            Log.w(TAG, "ACTION_CLICK failed", e)
+            false
+        }
+    }
+
+    /** 노드 한가운데를 좌표 탭. 실제로 제스처를 쐈으면 true */
+    private suspend fun performGestureTap(node: AccessibilityNodeInfo): Boolean {
         val r = Rect()
         try {
             node.getBoundsInScreen(r)
         } catch (e: Throwable) {
-            return@withContext ClickResult(true, false, "none", snippet, "bounds failed")
+            return false
         }
-        if (r.width() <= 0 || r.height() <= 0) {
-            return@withContext ClickResult(true, false, "none", snippet, "empty bounds")
-        }
-        val ok = tap(r.exactCenterX(), r.exactCenterY())
-        ClickResult(true, ok, if (ok) "gesture-tap" else "none", snippet)
+        if (r.width() <= 0 || r.height() <= 0) return false
+        // 화면 밖 좌표는 무시된다.
+        val cx = r.exactCenterX()
+        val cy = r.exactCenterY()
+        if (cx < 0 || cy < 0 || cx > screenWidth() || cy > screenHeight()) return false
+        return tap(cx, cy)
     }
 
     // ------------------------------------------------------------------ 줄(row) 매칭
@@ -677,11 +708,23 @@ class ScanService : AccessibilityService(), ScreenScanner {
         before: ScreenSnapshotInfo,
         baseEventCount: Int,
         timeoutMs: Long
+    ): Boolean = awaitScreenChange(before, baseEventCount, timeoutMs, RELOAD_EVENT_THRESHOLD)
+
+    /**
+     * 화면이 실제로 바뀌었는지 관찰한다. 클릭 검증과 새로고침 검증이 함께 쓴다.
+     *
+     * @param eventThreshold 서브트리 교체 이벤트가 이 횟수 이상이면 변화로 본다
+     */
+    private suspend fun awaitScreenChange(
+        before: ScreenSnapshotInfo,
+        baseEventCount: Int,
+        timeoutMs: Long,
+        eventThreshold: Int
     ): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            delay(150)
-            if (subtreeEventCount - baseEventCount >= RELOAD_EVENT_THRESHOLD) return true
+            delay(120)
+            if (subtreeEventCount - baseEventCount >= eventThreshold) return true
             val now = snapshotInfo()
             if (now.contentHash != before.contentHash) return true
             if (before.nodeCount > 4 && now.nodeCount <= before.nodeCount / 2) return true

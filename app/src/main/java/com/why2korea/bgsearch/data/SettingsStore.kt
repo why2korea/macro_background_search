@@ -33,6 +33,9 @@ class SettingsStore(private val context: Context) {
         val TERTIARY = stringPreferencesKey("tertiary_texts_json")
         val MATCH_ALL = booleanPreferencesKey("match_all")
         val CLICK_ROW = booleanPreferencesKey("click_found_row")
+        val AFTER_CLICK_WAIT = longPreferencesKey("after_click_wait_ms")
+        val PREFER_GESTURE = booleanPreferencesKey("prefer_gesture_tap")
+        val STOP_WHEN_FOUND = booleanPreferencesKey("stop_when_found")
         val BACK_ON_REFRESH_FAIL = booleanPreferencesKey("back_on_refresh_fail")
         val RATIO = floatPreferencesKey("scroll_ratio")
         val STEP_DELAY = longPreferencesKey("step_delay_ms")
@@ -72,6 +75,9 @@ class SettingsStore(private val context: Context) {
             matchAll = p[Keys.MATCH_ALL] ?: d.matchAll,
             tertiaryTexts = decodeStrings(p[Keys.TERTIARY] ?: ""),
             clickFoundRow = p[Keys.CLICK_ROW] ?: d.clickFoundRow,
+            afterClickWaitMs = p[Keys.AFTER_CLICK_WAIT] ?: d.afterClickWaitMs,
+            preferGestureTap = p[Keys.PREFER_GESTURE] ?: d.preferGestureTap,
+            stopWhenFound = p[Keys.STOP_WHEN_FOUND] ?: d.stopWhenFound,
             backOnRefreshFail = p[Keys.BACK_ON_REFRESH_FAIL] ?: d.backOnRefreshFail,
             scrollRatio = p[Keys.RATIO] ?: d.scrollRatio,
             stepDelayMs = p[Keys.STEP_DELAY] ?: d.stepDelayMs,
@@ -103,6 +109,9 @@ class SettingsStore(private val context: Context) {
             p[Keys.TERTIARY] = encodeStrings(c.tertiaryTexts)
             p[Keys.MATCH_ALL] = c.matchAll
             p[Keys.CLICK_ROW] = c.clickFoundRow
+            p[Keys.AFTER_CLICK_WAIT] = c.afterClickWaitMs
+            p[Keys.PREFER_GESTURE] = c.preferGestureTap
+            p[Keys.STOP_WHEN_FOUND] = c.stopWhenFound
             p[Keys.BACK_ON_REFRESH_FAIL] = c.backOnRefreshFail
             p[Keys.RATIO] = c.scrollRatio
             p[Keys.STEP_DELAY] = c.stepDelayMs

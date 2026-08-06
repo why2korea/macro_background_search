@@ -181,10 +181,20 @@ fun FoundBanner(actions: OverlayActions) {
             if (s.foundShotPath != null) {
                 Text("스크린샷 저장됨", color = Color(0xFFFFCDD2), fontSize = 11.sp)
             }
+            if (!s.running) {
+                Text("재검색 정지됨", color = Color(0xFFFFE0E0), fontSize = 11.sp)
+            }
             Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                BarButton("계속", Color(0xFF1B5E20), Modifier.weight(1f)) { actions.onResumeSearch() }
-                BarButton("정지", Color(0xFF37474F), Modifier.weight(1f)) { actions.onStop() }
+                // 발견 후 자동 정지된 상태면 [계속] 은 "다시 시작" 이 된다.
+                BarButton(
+                    if (s.running) "계속" else "다시 시작",
+                    Color(0xFF1B5E20),
+                    Modifier.weight(1f)
+                ) { actions.onResumeSearch() }
+                if (s.running) {
+                    BarButton("정지", Color(0xFF37474F), Modifier.weight(1f)) { actions.onStop() }
+                }
                 BarButton("닫기", Color(0xFF616161), Modifier.weight(1f)) { actions.onDismissBanner() }
             }
         }

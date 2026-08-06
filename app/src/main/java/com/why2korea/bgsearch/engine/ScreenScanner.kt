@@ -66,8 +66,15 @@ interface ScreenScanner {
     /** 주어진 문자열들이 현재 화면에 있는지 검사해 발견된 것만 반환 */
     fun matchOnScreen(targets: List<String>): List<String>
 
-    /** 1차 문자열을 찾아 클릭 */
-    suspend fun clickText(text: String): ClickResult
+    /**
+     * 1차 문자열을 찾아 클릭한다.
+     *
+     * 클릭 후 화면이 실제로 바뀌었는지 확인하고, 안 바뀌었으면 다른 방식으로 한 번 더 시도한다.
+     * (ACTION_CLICK 이 true 를 돌려주고도 실제로는 아무 일도 일어나지 않는 웹페이지가 있다)
+     *
+     * @param preferGesture true 면 좌표 탭 제스처를 먼저 시도한다
+     */
+    suspend fun clickText(text: String, preferGesture: Boolean): ClickResult
 
     /**
      * 2차 문자열이 있는 "줄"을 찾는다. 3차 문자열이 주어지면 같은 줄에 그것까지 있어야 한다.

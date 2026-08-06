@@ -52,7 +52,8 @@ class SearchEngine(
     companion object {
         const val MIN_REFRESH_MS = 3_000L
         const val MAX_STEPS_PER_PHASE = 400
-        const val AFTER_CLICK_WAIT_MS = 1_500L
+        /** 같은 자리에서 클릭을 다시 시도하는 최대 횟수 */
+        const val CLICK_RETRY_MAX = 3
         const val PRIMARY_FAIL_WARN_AT = 5
         const val REFRESH_FAIL_WARN_AT = 5
         /** 줄 클릭 후 화면이 바뀔 시간을 준 뒤 캡처한다 */
@@ -123,7 +124,11 @@ class SearchEngine(
         }
     }
 
-    fun stop(reason: String) {
+    /**
+     * @param clearFound false 면 발견 알림·배너를 지우지 않는다.
+     *   "발견 후 자동 정지" 에서는 발견 결과를 그대로 보여줘야 하므로 지우면 안 된다.
+     */
+    fun stop(reason: String, clearFound: Boolean = true) {
         resumeSignal?.let { if (!it.isCompleted) it.complete(false) }
         resumeSignal = null
         loopJob?.cancel()
@@ -131,10 +136,15 @@ class SearchEngine(
         tickerJob?.cancel()
         tickerJob = null
         SearchBus.update {
-            it.copy(running = false, phase = Phase.IDLE, countdown = 0, status = "정지됨 ($reason)")
+            it.copy(
+                running = false,
+                phase = if (clearFound) Phase.IDLE else it.phase,
+                countdown = 0,
+                status = "정지됨 ($reason)"
+            )
         }
         log("탐색 정지: $reason")
-        host.onFoundCleared()
+        if (clearFound) host.onFoundCleared()
         host.onLoopFinished(reason)
     }
 
@@ -221,9 +231,11 @@ class SearchEngine(
                     continue
                 }
 
-                // ---------------- 2. 클릭 후 화면 전환 대기
+                // ---------------- 2. 클릭 후 화면 전환 대기 (설정값)
                 SearchBus.update { it.copy(phase = Phase.AFTER_CLICK) }
-                delay(AFTER_CLICK_WAIT_MS)
+                val afterClick = cfg.afterClickWaitMs.coerceAtLeast(0L)
+                status("클릭 후 대기 ${afterClick / 1000.0}초")
+                delay(afterClick)
 
                 // ---------------- 3. 스크롤하며 2차(+3차) 문자열이 있는 줄 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.SCAN_SECONDARY) }
@@ -295,20 +307,27 @@ class SearchEngine(
         var step = 0
         var stable = 0
         var lastHash = Int.MIN_VALUE
+        var clickRetry = 0
 
         while (scope.isActive && step < MAX_STEPS_PER_PHASE) {
             val info = scanner.snapshotInfo()
             SearchBus.update { it.copy(step = step, targetPackage = info.packageName) }
             status("라운드 $round · 1차 문자열 탐색 (스크롤 $step)")
 
-            val r = scanner.clickText(cfg.primaryText)
+            val r = scanner.clickText(cfg.primaryText, cfg.preferGestureTap)
             if (r.found && r.clicked) {
                 primaryFailStreak = 0
-                log("1차 클릭 성공 [${r.method}] \"${r.snippet}\"")
+                log("1차 클릭 성공 [${r.method}] \"${r.snippet}\" - 화면 변화 확인됨")
                 return true
             }
             if (r.found && !r.clicked) {
-                log("1차 문자열은 찾았으나 클릭 실패 (${r.error ?: "?"})")
+                // 찾기는 했는데 클릭이 화면에 반영되지 않았다. 스크롤하지 말고 같은 자리에서 재시도한다.
+                log("1차 문자열 \"${r.snippet}\" 클릭이 화면에 반영되지 않음 (${r.error ?: "?"}) - 재시도")
+                delay(cfg.stepDelayMs)
+                clickRetry++
+                if (clickRetry < CLICK_RETRY_MAX) continue
+                log("클릭 재시도 ${CLICK_RETRY_MAX}회 실패 - 설정에서 '좌표 탭 우선'을 켜보세요")
+                clickRetry = 0
             }
 
             val moved = scanner.scrollDown(cfg.scrollRatio)
@@ -517,6 +536,13 @@ class SearchEngine(
             )
         }
         host.onFound(texts, hit.rowText, timeText, shotPath)
+
+        // 발견 후 자동 정지 (기본). 알림·배너는 그대로 남긴다.
+        if (cfg.stopWhenFound) {
+            log("발견했으므로 재검색을 정지합니다. (설정에서 끄면 [계속] 로 재개하는 방식으로 동작)")
+            stop("발견 후 자동 정지", clearFound = false)
+            return false
+        }
 
         // 사용자가 [계속] 을 누를 때까지 대기
         val d = CompletableDeferred<Boolean>()
