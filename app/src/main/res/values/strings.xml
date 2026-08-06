@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">백그라운드 문자열 탐색</string>
+    <string name="channel_status_name">탐색 상태</string>
+    <string name="channel_status_desc">탐색이 동작 중임을 알리는 상시 알림</string>
+    <string name="channel_found_name">문자열 발견 알림</string>
+    <string name="channel_found_desc">2차 문자열을 발견했을 때의 고우선순위 알림</string>
+</resources>
