@@ -276,7 +276,7 @@ private fun InputCard(state: SetupUiState, vm: SetupViewModel) {
                 fontSize = 13.sp
             )
             Text(
-                "설정하면 2차 문자열이 발견된 **그 줄 안에** 이 중 하나가 더 있어야 발견으로 칩니다. " +
+                "설정하면 2차 문자열이 발견된 「그 줄 안에」 이 중 하나가 더 있어야 발견으로 칩니다. " +
                     "비워두면 사용하지 않습니다.",
                 fontSize = 11.sp,
                 color = Color(0xFF757575)

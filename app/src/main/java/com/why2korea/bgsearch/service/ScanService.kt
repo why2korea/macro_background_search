@@ -64,6 +64,9 @@ class ScanService : AccessibilityService(), ScreenScanner {
          */
         private const val ROW_MAX_HEIGHT_RATIO = 0.30f
 
+        /** 이 횟수 이상 서브트리가 통째로 바뀌면 새로고침이 일어난 것으로 본다. */
+        private const val RELOAD_EVENT_THRESHOLD = 2
+
         /** 새로고침 컨트롤로 인정할 텍스트 (정규화 후 부분 일치) */
         private val REFRESH_LABELS = listOf(
             "새로고침", "새로 고침", "refresh", "reload", "다시 시도", "다시시도", "재시도"
@@ -90,6 +93,10 @@ class ScanService : AccessibilityService(), ScreenScanner {
     @Volatile
     private var connected = false
 
+    /** 화면 서브트리가 통째로 바뀐 횟수. 새로고침 판정에 쓴다. */
+    @Volatile
+    private var subtreeEventCount = 0
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
@@ -109,8 +116,31 @@ class ScanService : AccessibilityService(), ScreenScanner {
         super.onDestroy()
     }
 
-    /** 이벤트 구동이 아니라 엔진이 필요할 때 화면을 읽는 폴링 방식이므로 여기서 할 일은 없다. */
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    /**
+     * 탐색 자체는 폴링 방식이지만, "새로고침이 실제로 일어났는지" 판정에는 이벤트가 필요하다.
+     *
+     * 내용이 같은 페이지를 새로고침하면 전후 텍스트가 동일해서 화면 비교로는 잡히지 않는다.
+     * 반면 새로고침은 화면 서브트리를 통째로 갈아끼우므로 SUBTREE 변경 이벤트가 몰려서 들어온다.
+     * 그 이벤트 수를 세어 판정에 쓴다.
+     */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val e = event ?: return
+        // 우리 오버레이가 만든 이벤트는 무시한다.
+        if (e.packageName?.toString() == packageName) return
+        when (e.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> subtreeEventCount++
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                val types = try {
+                    e.contentChangeTypes
+                } catch (t: Throwable) {
+                    0
+                }
+                if (types and AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE != 0) {
+                    subtreeEventCount++
+                }
+            }
+        }
+    }
 
     override fun onInterrupt() = Unit
 
@@ -303,7 +333,18 @@ class ScanService : AccessibilityService(), ScreenScanner {
 
     // ------------------------------------------------------------------ 클릭
 
+    /**
+     * 읽을 수 있는 대상 화면이 있는지.
+     *
+     * 우리 앱(설정 화면·오버레이)이 앞에 나와 있으면 rootNodes() 가 비어 있다.
+     * 이때 탭·스와이프를 주입하면 **우리 설정 화면을 조작해 버린다.**
+     * (실기기에서 확인: 설정 화면의 한글 키보드가 눌려 입력값이 오염됐다)
+     * 그래서 화면을 조작하는 모든 동작은 이 검사를 먼저 통과해야 한다.
+     */
+    private fun hasTarget(): Boolean = rootNodes().isNotEmpty()
+
     override suspend fun clickText(text: String): ClickResult = withContext(Dispatchers.Main) {
+        if (!hasTarget()) return@withContext ClickResult(false, false, "no-target")
         val needle = TextNorm.of(text)
         if (needle.isEmpty()) return@withContext ClickResult(false, false, "none", error = "empty")
         val node = findNode(needle)
@@ -393,6 +434,7 @@ class ScanService : AccessibilityService(), ScreenScanner {
         tertiaries: List<String>,
         doClick: Boolean
     ): RowHit? = withContext(Dispatchers.Main) {
+        if (!hasTarget()) return@withContext null
         val sec = secondaries.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
         if (sec.isEmpty()) return@withContext null
         val ter = tertiaries.map { TextNorm.of(it) }.filter { it.isNotEmpty() }
@@ -509,6 +551,7 @@ class ScanService : AccessibilityService(), ScreenScanner {
     }
 
     override suspend fun scrollDown(ratio: Float): Boolean = withContext(Dispatchers.Main) {
+        if (!hasTarget()) return@withContext false
         val before = snapshotInfo().contentHash
 
         val node = scrollableNode()
@@ -537,6 +580,7 @@ class ScanService : AccessibilityService(), ScreenScanner {
     }
 
     override suspend fun scrollToTop(maxSteps: Int): Boolean = withContext(Dispatchers.Main) {
+        if (!hasTarget()) return@withContext false
         val h = screenHeight()
         val w = screenWidth()
         var unchanged = 0
@@ -580,6 +624,9 @@ class ScanService : AccessibilityService(), ScreenScanner {
      * 둘 다 실패하면 ok=false 를 돌려주고, 뒤로가기 복귀는 호출자(엔진)가 판단한다.
      */
     override suspend fun refreshPage(waitMs: Long): RefreshResult = withContext(Dispatchers.Main) {
+        if (!hasTarget()) {
+            return@withContext RefreshResult(false, "no-target", "대상 화면이 없어 새로고침하지 않음")
+        }
         scrollToTop(30)
         delay(300)
 
@@ -587,8 +634,9 @@ class ScanService : AccessibilityService(), ScreenScanner {
         val control = findRefreshControl()
         if (control != null) {
             val before = snapshotInfo()
+            val base = subtreeEventCount
             clickNodeOrGesture(control)
-            if (awaitReload(before, 4_000)) {
+            if (awaitReload(before, base, 4_000)) {
                 delay(waitMs)
                 return@withContext RefreshResult(true, "refresh-control", "새로고침 버튼 클릭")
             }
@@ -597,12 +645,15 @@ class ScanService : AccessibilityService(), ScreenScanner {
 
         // 2) 당겨서 새로고침 (느리게 끌어야 스크롤이 아니라 새로고침으로 인식된다)
         val before = snapshotInfo()
+        val base = subtreeEventCount
         val h = screenHeight()
         val w = screenWidth()
         swipe(w * 0.5f, h * 0.18f, w * 0.5f, h * 0.82f, 700)
-        if (awaitReload(before, 5_000)) {
+        if (awaitReload(before, base, 5_000)) {
             delay(waitMs)
-            return@withContext RefreshResult(true, "pull-to-refresh", "당겨서 새로고침")
+            return@withContext RefreshResult(
+                true, "pull-to-refresh", "당겨서 새로고침 (이벤트 ${subtreeEventCount - base}건)"
+            )
         }
 
         RefreshResult(false, "none", "새로고침이 확인되지 않음")
@@ -610,13 +661,27 @@ class ScanService : AccessibilityService(), ScreenScanner {
 
     /**
      * 새로고침이 실제로 일어났는지 관찰한다.
-     * 로딩 중에는 노드가 사라졌다가 다시 채워지므로, 내용 해시가 달라지거나
-     * 노드 수가 절반 이하로 떨어지는 순간을 잡는다.
+     *
+     * 세 가지 신호 중 하나라도 잡히면 새로고침으로 본다.
+     *  1) 서브트리 통째 교체 이벤트가 임계치 이상 (가장 신뢰도 높음)
+     *  2) 내용 해시가 달라짐
+     *  3) 노드 수가 절반 이하로 떨어짐 (로딩 중 빈 화면)
+     *
+     * 2·3번만으로는 **내용이 똑같은 페이지를 새로고침했을 때 잡히지 않는다.**
+     * (example.com 처럼 정적이고 캐시된 페이지에서 실제로 오판이 발생했다)
+     * 그래서 1번을 주 신호로 쓴다.
+     *
+     * @param baseEventCount 트리거 직전의 subtreeEventCount
      */
-    private suspend fun awaitReload(before: ScreenSnapshotInfo, timeoutMs: Long): Boolean {
+    private suspend fun awaitReload(
+        before: ScreenSnapshotInfo,
+        baseEventCount: Int,
+        timeoutMs: Long
+    ): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            delay(250)
+            delay(150)
+            if (subtreeEventCount - baseEventCount >= RELOAD_EVENT_THRESHOLD) return true
             val now = snapshotInfo()
             if (now.contentHash != before.contentHash) return true
             if (before.nodeCount > 4 && now.nodeCount <= before.nodeCount / 2) return true

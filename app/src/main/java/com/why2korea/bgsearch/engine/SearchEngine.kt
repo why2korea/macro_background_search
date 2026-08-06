@@ -63,6 +63,9 @@ class SearchEngine(
         const val LOOP_ERROR_BACKOFF_MS = 5_000L
         /** 접근성 서비스가 꺼져 있을 때 재확인 간격 */
         const val NO_SERVICE_RETRY_MS = 3_000L
+
+        /** 대상 화면이 없을 때 재확인 간격 */
+        const val NO_TARGET_RETRY_MS = 2_000L
     }
 
     @Volatile
@@ -206,10 +209,15 @@ class SearchEngine(
 
                 val scanner = awaitScanner() ?: continue
 
+                // ---------------- 0. 읽을 대상 화면이 있는지 확인
+                // 우리 앱(설정 화면)이 앞에 있으면 읽을 것도 없고, 조작하면 우리 UI 를 건드린다.
+                if (!awaitTargetScreen(scanner)) continue
+
                 // ---------------- 1. 1차 문자열 탐색 + 클릭
                 SearchBus.update { it.copy(phase = Phase.FIND_PRIMARY) }
                 if (!findAndClickPrimary(scanner, round, cfg)) {
-                    refreshAndRestart(scanner, "1차 문자열 미발견")
+                    // 아직 아무 화면에도 들어가지 않았으므로 뒤로가기를 하면 대상 페이지를 벗어난다.
+                    refreshAndRestart(scanner, "1차 문자열 미발견", allowBack = false)
                     continue
                 }
 
@@ -228,7 +236,8 @@ class SearchEngine(
                 }
 
                 // ---------------- 5. 미발견 → 페이지 새로고침 → 1차부터 재시작
-                refreshAndRestart(scanner, "2차 문자열 미발견")
+                // 1차를 클릭해 들어온 상태이므로, 새로고침이 안 되면 뒤로가기로 복귀해도 된다.
+                refreshAndRestart(scanner, "2차 문자열 미발견", allowBack = true)
             }
         } catch (e: CancellationException) {
             throw e
@@ -241,6 +250,26 @@ class SearchEngine(
                 loopJob = scope.launch { runLoop() }
             }
         }
+    }
+
+    /**
+     * 읽을 수 있는 대상 화면이 앞에 나올 때까지 기다린다.
+     *
+     * 우리 앱 화면(설정·오버레이)은 노드 순회에서 제외되므로 이때 노드 수가 0 이 된다.
+     * 그 상태로 진행하면 스크롤·새로고침 제스처가 **우리 설정 화면에 주입된다.**
+     * @return 대상 화면이 있으면 true
+     */
+    private suspend fun awaitTargetScreen(scanner: ScreenScanner): Boolean {
+        val info = scanner.snapshotInfo()
+        if (info.nodeCount > 0) {
+            SearchBus.update { it.copy(targetPackage = info.packageName) }
+            return true
+        }
+        SearchBus.update { it.copy(targetPackage = "") }
+        status("대상 화면이 없습니다 - 탐색할 앱 화면으로 이동하세요")
+        log("대상 화면 없음 (우리 앱이 앞에 있거나 읽을 내용이 없음) - 대기")
+        delay(NO_TARGET_RETRY_MS)
+        return false
     }
 
     /** 접근성 서비스가 연결될 때까지 기다린다. 루프를 죽이지 않고 계속 재시도한다. */
@@ -373,10 +402,17 @@ class SearchEngine(
      * 미발견 처리: 페이지를 **실제로** 새로고침한 뒤 1차 탐색부터 다시 시작한다.
      *
      * 제스처를 보낸 것만으로 성공으로 치지 않는다. ScanService 가 화면이 실제로 다시
-     * 그려졌는지 확인하고, 방법을 바꿔가며 재시도한다. 그래도 안 되면 뒤로가기로
-     * 이전 화면에 복귀해 1차 클릭부터 다시 타게 한다. (목록→상세 구조에서 사실상 재조회)
+     * 그려졌는지 확인하고, 방법을 바꿔가며 재시도한다.
+     *
+     * @param allowBack 새로고침이 끝내 확인되지 않았을 때 뒤로가기로 복귀해도 되는지.
+     *   2차 미발견이면 1차를 클릭해 들어온 상태라 뒤로가기가 곧 목록 복귀 = 재조회다.
+     *   1차 미발견이면 아직 아무 데도 안 들어갔으므로 뒤로가기를 하면 대상 페이지를 벗어난다.
      */
-    private suspend fun refreshAndRestart(scanner: ScreenScanner, reason: String) {
+    private suspend fun refreshAndRestart(
+        scanner: ScreenScanner,
+        reason: String,
+        allowBack: Boolean
+    ) {
         SearchBus.update { it.copy(phase = Phase.REFRESHING) }
         val wait = config.refreshWaitMs.coerceAtLeast(MIN_REFRESH_MS)
         status("$reason - 새로고침 중")
@@ -408,7 +444,7 @@ class SearchEngine(
         // 새로고침이 끝내 확인되지 않았다 → 뒤로가기로 복귀해 1차부터 다시 탄다
         refreshFailStreak++
         log("새로고침 확인 실패 (${result.detail}) · 연속 $refreshFailStreak 회")
-        if (config.backOnRefreshFail) {
+        if (allowBack && config.backOnRefreshFail) {
             log("뒤로가기로 이전 화면 복귀 후 1차부터 재시작")
             try {
                 scanner.pressBack()
@@ -416,6 +452,8 @@ class SearchEngine(
                 Log.w(TAG, "pressBack failed", e)
             }
             delay(1_200)
+        } else if (!allowBack) {
+            log("1차 미발견 상태라 뒤로가기는 하지 않음 (대상 화면 이탈 방지)")
         }
         if (refreshFailStreak >= REFRESH_FAIL_WARN_AT) {
             host.onWarn(
